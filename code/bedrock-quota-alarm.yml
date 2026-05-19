@@ -1,0 +1,1377 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Amazon Bedrock Ops Alert - Automated monitoring and quota management at scale solution"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "General Configuration"
+        Parameters:
+          - CustomerName
+          - StakeholderEmailList
+          - NotificationPreference
+      - Label:
+          default: "Lambda Deployment Configuration"
+        Parameters:
+          - LambdaS3Bucket
+          - LambdaS3Key
+      - Label:
+          default: "Model Specification"
+        Parameters:
+          - BedrockModelName
+          - BedrockModelId
+          - GeoDataResidencyRequirement
+          - InputModalities
+      - Label:
+          default: "Model Quota Configuration"
+        Parameters:
+          - RequestsPerMinuteQuotaCode
+          - RequestsPerMinuteIncreasePercent
+          - TokensPerMinuteQuotaCode
+          - TokensPerMinuteIncreasePercent
+      - Label:
+          default: "Model Usage Budget (Threshold)"
+        Parameters:
+          - RequestsPerMinuteThresholdPercent
+          - TokensPerMinuteThresholdPercent
+          - LatencyThresholdMs
+      - Label:
+          default: "Automated Support Case Configuration"
+        Parameters:
+          - EnableAutomatedSupportCase
+          - SupportCaseLookbackDays
+          - UseCaseDescription
+      - Label:
+          default: "Automated Threshold Update Configuration"
+        Parameters:
+          - EnableAutomatedThresholdUpdate
+          - ThresholdUpdateScheduleIntervalDays
+      - Label:
+          default: "Layer 1: Critical Error Detection Alarm Configuration"
+        Parameters:
+          - ErrorThreshold
+          - CriticalAlarmEvaluationPeriods
+      - Label:
+          default: "Layer 2: Usage Rate Monitoring Alarm Configuration"
+        Parameters:
+          - WarningAlarmEvaluationPeriods
+          - LatencyAlarmPeriod
+          - LatencyAlarmEvaluationPeriods
+      - Label:
+          default: "Layer 3: Anomaly Detection Alarm Configuration"
+        Parameters:
+          - AnomalyDetectionPeriod
+          - AnomalyEvaluationPeriods
+          - AnomalySensitivity
+      - Label:
+          default: "Common Alarm Configuration"
+        Parameters:
+          - AlarmEvaluationPeriod
+    ParameterLabels:
+      CustomerName:
+        default: "Customer Name"
+      StakeholderEmailList:
+        default: "Stakeholder Email List"
+      NotificationPreference:
+        default: "Notification Preference"
+      BedrockModelName:
+        default: "Bedrock Model Name"
+      BedrockModelId:
+        default: "Bedrock Model ID"
+      GeoDataResidencyRequirement:
+        default: "Geographic Data Residency Requirement"
+      InputModalities:
+        default: "Input Modalities"
+      LambdaS3Bucket:
+        default: "Lambda S3 Bucket"
+      LambdaS3Key:
+        default: "Lambda S3 Key"
+      EnableAutomatedSupportCase:
+        default: "Enable Automated Support Case"
+      SupportCaseLookbackDays:
+        default: "Support Case Lookback Days"
+      UseCaseDescription:
+        default: "Use Case Description"
+      TokensPerMinuteIncreasePercent:
+        default: "Tokens Per Minute Increase Percent"
+      TokensPerMinuteQuotaCode:
+        default: "Tokens Per Minute Quota Code"
+      RequestsPerMinuteIncreasePercent:
+        default: "Requests Per Minute Increase Percent"
+      RequestsPerMinuteQuotaCode:
+        default: "Requests Per Minute Quota Code"
+      ErrorThreshold:
+        default: "Error Threshold"
+      CriticalAlarmEvaluationPeriods:
+        default: "Critical Alarm Evaluation Periods"
+      RequestsPerMinuteThresholdPercent:
+        default: "Requests Per Minute Threshold Percent"
+      TokensPerMinuteThresholdPercent:
+        default: "Tokens Per Minute Threshold Percent"
+      LatencyThresholdMs:
+        default: "Latency Threshold (ms)"
+      WarningAlarmEvaluationPeriods:
+        default: "Warning Alarm Evaluation Periods"
+      LatencyAlarmPeriod:
+        default: "Latency Alarm Period"
+      LatencyAlarmEvaluationPeriods:
+        default: "Latency Alarm Evaluation Periods"
+      AnomalyDetectionPeriod:
+        default: "Anomaly Detection Period"
+      AnomalyEvaluationPeriods:
+        default: "Anomaly Evaluation Periods"
+      AnomalySensitivity:
+        default: "Anomaly Sensitivity"
+      AlarmEvaluationPeriod:
+        default: "Alarm Evaluation Period"
+      EnableAutomatedThresholdUpdate:
+        default: "Enable Automated Threshold Update"
+      ThresholdUpdateScheduleIntervalDays:
+        default: "Threshold Update Schedule Interval (Days)"
+
+Parameters:
+  # General Configuration
+  CustomerName:
+    Type: String
+    Description: Your company or team identifier for resource naming (max 10 characters). Used in alarm names, Parameter Store paths, and Lambda function names.
+    MinLength: 1
+    MaxLength: 10
+    AllowedPattern: "^[a-zA-Z0-9-]+$"
+  StakeholderEmailList:
+    Type: CommaDelimitedList
+    Description: Comma-separated list of stakeholder emails for alerts, i.e. the email addresses of people who should be notified when alarms trigger (TAMs, Solutions Architects, customer contacts)
+  NotificationPreference:
+    Type: String
+    Default: "all"
+    AllowedValues: ["all", "critical", "warning"]
+    Description: "Email notification preference: all (Critical and Warning), critical (Critical Only), warning (Warning Only). Stored in Parameter Store, updatable post-deployment"
+  BedrockModelName:
+    Type: String
+    Default: "G-Opus-4-6"
+    Description: "Short model name for resource naming (max 15 characters). Alphanumeric characters and hyphens only, no spaces or special characters."
+    MinLength: 1
+    MaxLength: 15
+    AllowedPattern: "^[a-zA-Z0-9-]+$"
+  BedrockModelId:
+    Type: String
+    Default: "global.anthropic.claude-opus-4-6-v1"
+    Description: Bedrock model identifier, i.e. the specific model being monitored for your applications (e.g., Claude, Titan, Jurassic)
+  GeoDataResidencyRequirement:
+    Type: String
+    Default: "No"
+    AllowedValues: ["Yes", "No", "NA"]
+    Description: "Do you have geographic data residency requirement? If Yes, Global Cross Region Inference cannot be considered."
+  InputModalities:
+    Type: String
+    Default: "TEXT and IMAGE"
+    AllowedValues: ["TEXT and IMAGE", "TEXT Only", "IMAGE Only"]
+    Description: "Input modalities used by the model. Included in automated support cases for quota increase context."
+
+  # Lambda Deployment Configuration
+  LambdaS3Bucket:
+    Type: String
+    Description: S3 bucket name containing the Lambda deployment package (notification_processor.zip)
+    MinLength: 3
+    MaxLength: 63
+  LambdaS3Key:
+    Type: String
+    Default: "notification_processor.zip"
+    Description: S3 key (path) to the Lambda deployment package zip file
+    MinLength: 1
+
+  # Automated Support Case Configuration
+  EnableAutomatedSupportCase:
+    Type: String
+    Default: "Yes"
+    AllowedValues: ["Yes", "No"]
+    Description: "Enable automated support case creation (Yes/No). Stored in Parameter Store, updatable post-deployment"
+  SupportCaseLookbackDays:
+    Type: Number
+    Default: 60
+    AllowedValues: [45, 60, 90]
+    Description: "Number of days to look back when checking for existing unresolved support cases (duplicate detection). A new alarm appends to an existing case if one was created within this window."
+  UseCaseDescription:
+    Type: String
+    Default: "Enterprise production workload serving real-time AI-powered features to end users."
+    Description: "Brief description of the use case for quota increase justification. Included in automated support cases. Updatable via Parameter Store"
+    MaxLength: 1000
+  TokensPerMinuteIncreasePercent:
+    Type: Number
+    Default: 25
+    AllowedValues: [0, 25, 50, 75, 100]
+    Description: "TPM quota increase % (0-100). Set 0 to skip. Stored in Parameter Store, updatable post-deployment"
+  TokensPerMinuteQuotaCode:
+    Type: String
+    Default: "L-3DCCFAA4"
+    Description: "TPM quota code (e.g. L-3DCCFAA4). Required if Tokens Per Minute Increase Percent>0. Useful link:  https://console.aws.amazon.com/servicequotas/home/services/bedrock/quotas, https://docs.aws.amazon.com/general/latest/gr/bedrock.html#limits_bedrock"
+  RequestsPerMinuteIncreasePercent:
+    Type: Number
+    Default: 25
+    AllowedValues: [0, 25, 50, 75, 100]
+    Description: "RPM quota increase % (0-100). Set 0 to skip or when Requests Per Minute Quota Code is NA. Stored in Parameter Store, updatable post-deployment"
+  RequestsPerMinuteQuotaCode:
+    Type: String
+    Default: "L-3DD46812"
+    Description: "Set to NA if the model has no RPM quota; otherwise provide the RPM quota code (e.g. L-3DD46812), required when Requests Per Minute Increase Percent>0. Useful link: https://console.aws.amazon.com/servicequotas/home/services/bedrock/quotas, https://docs.aws.amazon.com/general/latest/gr/bedrock.html#limits_bedrock"
+
+  # Layer 1: Critical Error Detection Parameters
+  ErrorThreshold:
+    Type: Number
+    Default: 5
+    MinValue: 0
+    Description: "Error count threshold per evaluation period. 0 = immediate alert on any error. Default: 5. Example: >5 errors/min (say 6) X 5 evaluation periods = 30+ errors in 5 minutes will trigger the critical alarm (Min: 0)"
+  CriticalAlarmEvaluationPeriods:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: "Consecutive periods before critical alarm. 5 with 60s period = sustained errors for 5 minutes (Min: 1)"
+
+  # Layer 2: Usage Rate Monitoring Parameters
+  RequestsPerMinuteThresholdPercent:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 100
+    Description: "RPM threshold as percentage of quota (for example, 80 for 80% of quota limit). Reaching this threshold triggers an automated RPM quota increase support case if EnableAutomatedSupportCase is set to Yes. Ignored when Requests Per Minute Quota Code is NA"
+  TokensPerMinuteThresholdPercent:
+    Type: Number
+    Default: 80
+    MinValue: 1
+    MaxValue: 100
+    Description: "TPM threshold as percentage of quota (e.g., 80 for 80% of quota limit). Breaching this budget triggers an automated TPM quota increase support case, if Enable Automated Support Case is set to Yes"
+  LatencyThresholdMs:
+    Type: Number
+    Default: 240000
+    MinValue: 15000
+    Description: "Latency threshold in milliseconds (Min: 15000)"
+  WarningAlarmEvaluationPeriods:
+    Type: Number
+    Default: 5
+    MinValue: 1
+    Description: "Consecutive periods for warning alarm. Default: 5. Example: usage exceeding threshold for 5 consecutive minutes will trigger the warning alarm (Min: 1)"
+  LatencyAlarmPeriod:
+    Type: Number
+    Default: 300
+    AllowedValues: [60, 300, 900, 3600]
+    Description: "Latency check period in seconds (300 = 5 min)"
+  LatencyAlarmEvaluationPeriods:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    Description: "Consecutive latency checks before alert. Default: 2. Example: sustained high latency for 10 minutes (2 X 300s) will trigger the alarm (Min: 1)"
+
+  # Layer 3: Anomaly Detection Parameters
+  AnomalyDetectionPeriod:
+    Type: Number
+    Default: 300
+    AllowedValues: [60, 300, 900, 3600]
+    Description: "Anomaly check period in seconds (300 = 5 min)"
+  AnomalyEvaluationPeriods:
+    Type: Number
+    Default: 12
+    MinValue: 1
+    Description: "Consecutive anomaly periods before alert. Default: 12. Example: 60 minutes of sustained anomaly (12 X 300s) will trigger the alarm (Min: 1)"
+  AnomalySensitivity:
+    Type: Number
+    Default: 9
+    MinValue: 1
+    Description: "Anomaly sensitivity. 1 = most sensitive, 10 = least sensitive"
+
+  # Common Alarm Configuration
+  AlarmEvaluationPeriod:
+    Type: Number
+    Default: 60
+    AllowedValues: [60, 300, 900, 3600]
+    Description: "Alarm check period in seconds (60 = 1 min)"
+
+  # Automated Threshold Update Configuration
+  EnableAutomatedThresholdUpdate:
+    Type: String
+    Default: "Yes"
+    AllowedValues: ["Yes", "No"]
+    Description: "Enable automated threshold updates based on quota changes (Yes/No)."
+  ThresholdUpdateScheduleIntervalDays:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 30
+    Description: "How often to check and update alarm thresholds in days (1-30). Recommended: 1 for daily checks and update."
+
+Conditions:
+  EnableAutomatedThresholdUpdateCondition: !Equals [!Ref EnableAutomatedThresholdUpdate, "Yes"]
+  IsSingleDaySchedule: !Equals [!Ref ThresholdUpdateScheduleIntervalDays, 1]
+
+Resources:
+  # Custom KMS key for Bedrock Ops Alert solution — used by SNS topics and Secrets Manager
+  BedrockOpsAlertEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "KMS key for Bedrock Ops Alert — encrypts SNS topics and Secrets Manager secrets"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "Enable IAM User Permissions for Key Management"
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action:
+              - "kms:*"
+            Resource: "*"
+          - Sid: "Allow CloudWatch Alarms to Encrypt"
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:GenerateDataKey*"
+            Resource: "*"
+          - Sid: "Allow SNS Service to Use Key"
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - "kms:Decrypt"
+              - "kms:GenerateDataKey*"
+            Resource: "*"
+
+  BedrockOpsAlertEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${CustomerName}-bedrock-ops-alert-${BedrockModelName}"
+      TargetKeyId: !Ref BedrockOpsAlertEncryptionKey
+
+  # Secrets Manager for sensitive data — encrypted with shared KMS key
+  CustomerNameSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/customer-name"
+      SecretString: !Ref CustomerName
+      KmsKeyId: !Ref BedrockOpsAlertEncryptionKey
+      Description: "Customer name for Bedrock quota monitoring"
+
+  StakeholderEmailsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/stakeholder-emails"
+      SecretString: !Join [",", !Ref StakeholderEmailList]
+      KmsKeyId: !Ref BedrockOpsAlertEncryptionKey
+      Description: "Stakeholder emails for quota monitoring alerts"
+
+  NotificationPreferenceParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/notification-preference"
+      Type: String
+      Value: !Ref NotificationPreference
+      Description: "Email notification preference: all (Critical and Warning), critical (Critical Only), warning (Warning Only)"
+
+  # Parameter Store for support case automation configuration
+  EnableAutomatedSupportCaseParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/enable-automated-support-case"
+      Type: String
+      Value: !Ref EnableAutomatedSupportCase
+      Description: "Enable automated support case creation for quota increases"
+
+  UseCaseDescriptionParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/use-case-description"
+      Type: String
+      Value: !Ref UseCaseDescription
+      Description: "Use case description for quota increase justification"
+
+  TokensPerMinuteIncreasePercentParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/tokens-per-minute-increase-percent"
+      Type: String
+      Value: !Ref TokensPerMinuteIncreasePercent
+      Description: "Percentage increase to request for Tokens Per Minute quota"
+
+  RequestsPerMinuteIncreasePercentParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/requests-per-minute-increase-percent"
+      Type: String
+      Value: !Ref RequestsPerMinuteIncreasePercent
+      Description: "Percentage increase to request for Requests Per Minute quota"
+
+  # Raw CloudWatch alarms (Lambda subscription only)
+  RawAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${CustomerName}-Bedrock-Alarms-Raw-${BedrockModelName}"
+      KmsMasterKeyId: !Ref BedrockOpsAlertEncryptionKey
+
+  # Formatted notifications (Email subscriptions)
+  FormattedNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${CustomerName}-Bedrock-Alarms-Formatted-${BedrockModelName}"
+      KmsMasterKeyId: !Ref BedrockOpsAlertEncryptionKey
+
+  # SNS Topic Policy to allow CloudWatch Alarms to publish
+  RawAlarmTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref RawAlarmTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "AllowCloudWatchAlarmsToPublish"
+            Effect: Allow
+            Principal:
+              Service: cloudwatch.amazonaws.com
+            Action:
+              - "SNS:Publish"
+            Resource: !Ref RawAlarmTopic
+            Condition:
+              ArnLike:
+                "aws:SourceArn": !Sub "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${CustomerName}-Bedrock-*"
+
+  # Lambda Layer for shared quota calculation utilities
+  QuotaUtilsLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub "${CustomerName}-Quota-Utils-Layer-${BedrockModelName}"
+      Description: "Shared utilities for quota calculation and threshold management"
+      Content:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: "quota_utils_layer.zip"
+      CompatibleRuntimes:
+        - python3.14
+      CompatibleArchitectures:
+        - arm64
+
+  # Lambda for calculating alarm thresholds from Service Quotas
+  QuotaCalculator:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${CustomerName}-Quota-Calculator-${BedrockModelName}"
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt QuotaCalculatorRole.Arn
+      Timeout: 300
+      Architectures:
+        - arm64
+      Layers:
+        - !Ref QuotaUtilsLayer
+      Code:
+        ZipFile: |
+          import json
+          import urllib3
+          from quota_utils import calculate_thresholds, store_in_parameter_store
+          
+          http = urllib3.PoolManager()
+          
+          def send_response(event, context, status, reason=None, physical_id=None, data=None):
+              response_body = {
+                  'Status': status,
+                  'Reason': reason or 'See CloudWatch Log Stream: ' + context.log_stream_name,
+                  'PhysicalResourceId': physical_id or context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {}
+              }
+              json_response = json.dumps(response_body).encode('utf-8')
+              try:
+                  http.request('PUT', event['ResponseURL'], body=json_response, headers={'Content-Type': ''})
+                  print('Response sent successfully: ' + status)
+              except Exception as e:
+                  print('Failed to send response: ' + str(e))
+          
+          def handler(event, context):
+              print('Event: ' + json.dumps(event))
+              try:
+                  request_type = event['RequestType']
+                  if request_type in ['Create', 'Update']:
+                      props = event['ResourceProperties']
+                      rpm_quota_code = props['RequestsPerMinuteQuotaCode']
+                      tpm_quota_code = props['TokensPerMinuteQuotaCode']
+                      rpm_percent = float(props['RequestsPerMinuteThresholdPercent'])
+                      tpm_percent = float(props['TokensPerMinuteThresholdPercent'])
+                      customer_name = props['CustomerName']
+                      model_name = props['BedrockModelName']
+                      print('Calculating thresholds: RPM=' + str(rpm_percent) + '%, TPM=' + str(tpm_percent) + '%')
+                      thresholds = calculate_thresholds(rpm_quota_code, tpm_quota_code, rpm_percent, tpm_percent)
+                      print('Calculated thresholds: ' + json.dumps(thresholds))
+                      # Convert keys to match CloudFormation output format
+                      cf_thresholds = {
+                          'RpmThreshold': thresholds['rpm_threshold'],
+                          'TpmThreshold': thresholds['tpm_threshold']
+                      }
+                      store_in_parameter_store(customer_name, model_name, thresholds)
+                      send_response(event, context, 'SUCCESS', reason='Thresholds calculated successfully', physical_id=customer_name + '-' + model_name + '-thresholds', data=cf_thresholds)
+                  elif request_type == 'Delete':
+                      print('Delete request - no action needed')
+                      send_response(event, context, 'SUCCESS', reason='Delete completed', physical_id=event.get('PhysicalResourceId', context.log_stream_name))
+              except Exception as e:
+                  print('Error: ' + str(e))
+                  import traceback
+                  traceback.print_exc()
+                  send_response(event, context, 'FAILED', reason=str(e), physical_id=context.log_stream_name)
+
+  QuotaCalculatorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CustomerName}-Quota-Calculator-Role-${BedrockModelName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ServiceQuotasPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - servicequotas:GetServiceQuota
+                # Note: Service Quotas API does not support resource-level permissions
+                # AWS requires Resource: "*" for this action
+                # Reference: https://docs.aws.amazon.com/servicequotas/latest/userguide/identity-access-management.html
+                Resource: "*"
+        - PolicyName: ParameterStorePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/thresholds/*"
+
+  QuotaCalculatorCustomResource:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - QuotaCalculator
+    Properties:
+      ServiceToken: !GetAtt QuotaCalculator.Arn
+      RequestsPerMinuteQuotaCode: !Ref RequestsPerMinuteQuotaCode
+      TokensPerMinuteQuotaCode: !Ref TokensPerMinuteQuotaCode
+      RequestsPerMinuteThresholdPercent: !Ref RequestsPerMinuteThresholdPercent
+      TokensPerMinuteThresholdPercent: !Ref TokensPerMinuteThresholdPercent
+      CustomerName: !Ref CustomerName
+      BedrockModelName: !Ref BedrockModelName
+
+  # Lambda for updating alarms when quotas change
+  AlarmUpdater:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${CustomerName}-Alarm-Updater-${BedrockModelName}"
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt AlarmUpdaterRole.Arn
+      Timeout: 300
+      Architectures:
+        - arm64
+      Layers:
+        - !Ref QuotaUtilsLayer
+      Environment:
+        Variables:
+          CUSTOMER_NAME: !Ref CustomerName
+          BEDROCK_MODEL_NAME: !Ref BedrockModelName
+          RPM_QUOTA_CODE: !Ref RequestsPerMinuteQuotaCode
+          TPM_QUOTA_CODE: !Ref TokensPerMinuteQuotaCode
+          RPM_THRESHOLD_PERCENT: !Ref RequestsPerMinuteThresholdPercent
+          TPM_THRESHOLD_PERCENT: !Ref TokensPerMinuteThresholdPercent
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import os
+          from quota_utils import calculate_thresholds, store_in_parameter_store
+          
+          def update_alarms(customer_name, model_name, thresholds):
+              cloudwatch = boto3.client('cloudwatch')
+              alarm_updates = [
+                  {'name': customer_name + '-Bedrock-HighInvocationRate-Warning-' + model_name, 'threshold': thresholds['rpm_threshold']},
+                  {'name': customer_name + '-Bedrock-HighTPMQuotaUsage-Warning-' + model_name, 'threshold': thresholds['tpm_threshold']}
+              ]
+              for alarm in alarm_updates:
+                  try:
+                      response = cloudwatch.describe_alarms(AlarmNames=[alarm['name']])
+                      if not response['MetricAlarms']:
+                          print('Alarm not found: ' + alarm['name'])
+                          continue
+                      existing_alarm = response['MetricAlarms'][0]
+                      cloudwatch.put_metric_alarm(
+                          AlarmName=alarm['name'],
+                          AlarmDescription=existing_alarm['AlarmDescription'],
+                          MetricName=existing_alarm['MetricName'],
+                          Namespace=existing_alarm['Namespace'],
+                          Statistic=existing_alarm['Statistic'],
+                          Period=existing_alarm['Period'],
+                          EvaluationPeriods=existing_alarm['EvaluationPeriods'],
+                          Threshold=alarm['threshold'],
+                          ComparisonOperator=existing_alarm['ComparisonOperator'],
+                          Dimensions=existing_alarm['Dimensions'],
+                          TreatMissingData=existing_alarm.get('TreatMissingData', 'notBreaching')
+                      )
+                      print('Updated alarm: ' + alarm['name'] + ' with threshold: ' + str(alarm['threshold']))
+                  except Exception as e:
+                      print('Failed to update alarm ' + alarm['name'] + ': ' + str(e))
+          
+          def handler(event, context):
+              print('Event: ' + json.dumps(event))
+              try:
+                  customer_name = os.environ['CUSTOMER_NAME']
+                  model_name = os.environ['BEDROCK_MODEL_NAME']
+                  rpm_quota_code = os.environ['RPM_QUOTA_CODE']
+                  tpm_quota_code = os.environ['TPM_QUOTA_CODE']
+                  rpm_percent = float(os.environ['RPM_THRESHOLD_PERCENT'])
+                  tpm_percent = float(os.environ['TPM_THRESHOLD_PERCENT'])
+                  print('Recalculating thresholds for ' + customer_name + '/' + model_name)
+                  thresholds = calculate_thresholds(rpm_quota_code, tpm_quota_code, rpm_percent, tpm_percent)
+                  print('New thresholds: ' + json.dumps(thresholds))
+                  update_alarms(customer_name, model_name, thresholds)
+                  store_in_parameter_store(customer_name, model_name, thresholds)
+                  return {'statusCode': 200, 'body': json.dumps({'message': 'Alarms updated successfully', 'thresholds': thresholds})}
+              except Exception as e:
+                  print('Error: ' + str(e))
+                  import traceback
+                  traceback.print_exc()
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+
+  AlarmUpdaterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CustomerName}-Alarm-Updater-Role-${BedrockModelName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ServiceQuotasPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - servicequotas:GetServiceQuota
+                # Note: Service Quotas API does not support resource-level permissions
+                # AWS requires Resource: "*" for this action
+                # Reference: https://docs.aws.amazon.com/servicequotas/latest/userguide/identity-access-management.html
+                Resource: "*"
+        - PolicyName: CloudWatchAlarmsPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:PutMetricAlarm
+                # Least privilege: Only the 2 specific alarms this function updates
+                Resource:
+                  - !Sub "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${CustomerName}-Bedrock-HighInvocationRate-Warning-${BedrockModelName}"
+                  - !Sub "arn:aws:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:${CustomerName}-Bedrock-HighTPMQuotaUsage-Warning-${BedrockModelName}"
+        - PolicyName: ParameterStorePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:PutParameter
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/thresholds/*"
+
+  # EventBridge rule for automated threshold updates (conditional)
+  ThresholdUpdateSchedule:
+    Type: AWS::Events::Rule
+    Condition: EnableAutomatedThresholdUpdateCondition
+    Properties:
+      Name: !Sub "${CustomerName}-Threshold-Update-Schedule-${BedrockModelName}"
+      Description: "Automated schedule to update alarm thresholds based on current quotas"
+      ScheduleExpression: !If
+        - IsSingleDaySchedule
+        - "rate(1 day)"
+        - !Sub "rate(${ThresholdUpdateScheduleIntervalDays} days)"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AlarmUpdater.Arn
+          Id: AlarmUpdaterTarget
+
+  AlarmUpdaterEventPermission:
+    Type: AWS::Lambda::Permission
+    Condition: EnableAutomatedThresholdUpdateCondition
+    Properties:
+      FunctionName: !Ref AlarmUpdater
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ThresholdUpdateSchedule.Arn
+
+  # Separate Lambda for email subscription management
+  EmailSubscriptionManager:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${CustomerName}-Email-Subscription-Manager-${BedrockModelName}"
+      Runtime: python3.14
+      Handler: index.handler
+      Role: !GetAtt EmailSubscriptionManagerRole.Arn
+      Timeout: 120
+      Architectures:
+        - arm64
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import urllib3
+
+          http = urllib3.PoolManager()
+
+          def send_response(event, context, status, reason=None, physical_id=None, data=None):
+              """Send response to CloudFormation"""
+              response_body = {
+                  'Status': status,
+                  'Reason': reason or f"See CloudWatch Log Stream: {context.log_stream_name}",
+                  'PhysicalResourceId': physical_id or context.log_stream_name,
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'Data': data or {}
+              }
+              
+              json_response = json.dumps(response_body).encode('utf-8')
+              
+              try:
+                  http.request(
+                      'PUT',
+                      event['ResponseURL'],
+                      body=json_response,
+                      headers={'Content-Type': ''}
+                  )
+                  print(f"Response sent successfully: {status}")
+              except Exception as e:
+                  print(f"Failed to send response: {str(e)}")
+
+          def handler(event, context):
+              print(f"Event: {json.dumps(event)}")
+              
+              try:
+                  request_type = event['RequestType']
+                  topic_arn = event['ResourceProperties']['TopicArn']
+                  email_list = event['ResourceProperties']['EmailList']
+                  
+                  sns = boto3.client('sns')
+                  
+                  if request_type == 'Create':
+                      print(f"Creating subscriptions for {len(email_list)} emails")
+                      for email in email_list:
+                          email = email.strip()
+                          if email:
+                              try:
+                                  sns.subscribe(
+                                      TopicArn=topic_arn,
+                                      Protocol='email',
+                                      Endpoint=email
+                                  )
+                                  print(f"Subscribed: {email}")
+                              except Exception as e:
+                                  print(f"Failed to subscribe {email}: {str(e)}")
+                      
+                      send_response(event, context, 'SUCCESS', 
+                                  reason='Email subscriptions created',
+                                  physical_id=f"{topic_arn}-subscriptions")
+                  
+                  elif request_type == 'Delete':
+                      print(f"Deleting subscriptions for topic: {topic_arn}")
+                      try:
+                          paginator = sns.get_paginator('list_subscriptions_by_topic')
+                          for page in paginator.paginate(TopicArn=topic_arn):
+                              for sub in page['Subscriptions']:
+                                  if sub['Protocol'] == 'email':
+                                      try:
+                                          sns.unsubscribe(SubscriptionArn=sub['SubscriptionArn'])
+                                          print(f"Unsubscribed: {sub['Endpoint']}")
+                                      except Exception as e:
+                                          print(f"Failed to unsubscribe {sub['Endpoint']}: {str(e)}")
+                      except Exception as e:
+                          print(f"Error during deletion: {str(e)}")
+                      
+                      send_response(event, context, 'SUCCESS',
+                                  reason='Email subscriptions deleted',
+                                  physical_id=f"{topic_arn}-subscriptions")
+                  
+                  elif request_type == 'Update':
+                      print("Update not implemented, treating as success")
+                      send_response(event, context, 'SUCCESS',
+                                  reason='Update not required',
+                                  physical_id=f"{topic_arn}-subscriptions")
+                  
+              except Exception as e:
+                  print(f"Error: {str(e)}")
+                  send_response(event, context, 'FAILED',
+                              reason=str(e),
+                              physical_id=context.log_stream_name)
+
+  EmailSubscriptionManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CustomerName}-Email-Subscription-Role-${BedrockModelName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SNSSubscriptionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Subscribe
+                  - sns:Unsubscribe
+                  - sns:ListSubscriptionsByTopic
+                Resource:
+                  - !Ref FormattedNotificationTopic
+
+  # Email subscriptions to formatted topic
+  EmailSubscriptions:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - EmailSubscriptionManager
+      - FormattedNotificationTopic
+    Properties:
+      ServiceToken: !GetAtt EmailSubscriptionManager.Arn
+      TopicArn: !Ref FormattedNotificationTopic
+      EmailList: !Ref StakeholderEmailList
+
+  # Lambda to process raw alarms and send formatted notifications
+  NotificationProcessor:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${CustomerName}-Bedrock-Notification-Processor-${BedrockModelName}"
+      Runtime: python3.14
+      Handler: notification_processor.handler
+      Role: !GetAtt NotificationProcessorRole.Arn
+      Timeout: 600
+      Architectures:
+        - arm64
+      Layers:
+        - !Ref QuotaUtilsLayer
+      Environment:
+        Variables:
+          CUSTOMER_NAME_SECRET: !Ref CustomerNameSecret
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BEDROCK_MODEL_NAME: !Ref BedrockModelName
+          GEO_DATA_RESIDENCY_REQUIREMENT: !Ref GeoDataResidencyRequirement
+          INPUT_MODALITIES: !Ref InputModalities
+          STAKEHOLDER_EMAILS_SECRET: !Ref StakeholderEmailsSecret
+          NOTIFICATION_PREFERENCE_PARAM: !Ref NotificationPreferenceParameter
+          FORMATTED_TOPIC_ARN: !Ref FormattedNotificationTopic
+          ENABLE_AUTOMATED_SUPPORT_CASE_PARAM: !Ref EnableAutomatedSupportCaseParameter
+          USE_CASE_DESCRIPTION_PARAM: !Ref UseCaseDescriptionParameter
+          TOKENS_PER_MINUTE_INCREASE_PERCENT_PARAM: !Ref TokensPerMinuteIncreasePercentParameter
+          REQUESTS_PER_MINUTE_INCREASE_PERCENT_PARAM: !Ref RequestsPerMinuteIncreasePercentParameter
+          SUPPORT_CASE_LOOKBACK_DAYS: !Ref SupportCaseLookbackDays
+          REQUESTS_PER_MINUTE_QUOTA_CODE: !Ref RequestsPerMinuteQuotaCode
+          TOKENS_PER_MINUTE_QUOTA_CODE: !Ref TokensPerMinuteQuotaCode
+          # Alarm pattern configurations (comma-separated)
+          ELIGIBLE_ALARM_PATTERNS: "ServerErrors-Critical,Throttles-Critical,ClientErrors-Critical,HighLatency-Warning,LatencyAnomaly-Warning,HighInvocationRate-Warning,HighTPMQuotaUsage-Warning,InvocationAnomaly-Warning,InputTokenAnomaly-Warning,OutputTokenAnomaly-Warning"
+          RPM_ALARM_PATTERNS: "HighInvocationRate,InvocationAnomaly"
+          TPM_ALARM_PATTERNS: "HighTPMQuotaUsage,InputTokenAnomaly,OutputTokenAnomaly"
+      Code:
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: !Ref LambdaS3Key
+
+  NotificationProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${CustomerName}-Bedrock-Processor-Role-${BedrockModelName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: KMSPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "kms:Decrypt"
+                  - "kms:DescribeKey"
+                  - "kms:GenerateDataKey"
+                Resource:
+                  - !GetAtt BedrockOpsAlertEncryptionKey.Arn
+        - PolicyName: SNSPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref RawAlarmTopic
+                  - !Ref FormattedNotificationTopic
+        - PolicyName: SecretsManagerPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref CustomerNameSecret
+                  - !Ref StakeholderEmailsSecret
+        - PolicyName: ParameterStorePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/*"
+        - PolicyName: ServiceQuotasPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - servicequotas:GetServiceQuota
+                  - servicequotas:ListServiceQuotas
+                # Note: Service Quotas API does not support resource-level permissions
+                # AWS requires Resource: "*" for these actions
+                # Reference: https://docs.aws.amazon.com/servicequotas/latest/userguide/identity-access-management.html
+                Resource: "*"
+        - PolicyName: SupportPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - support:CreateCase
+                  - support:AddCommunicationToCase
+                  - support:DescribeCommunications
+                  - support:DescribeCases
+                  - support:DescribeSeverityLevels
+                # Note: AWS Support API does not support resource-level permissions
+                # AWS requires Resource: "*" for these actions
+                # Reference: https://docs.aws.amazon.com/awssupport/latest/user/security-iam.html
+                Resource: "*"
+        - PolicyName: CloudWatchPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                  - cloudwatch:GetMetricStatistics
+                # Note: These CloudWatch read-only actions do not support resource-level permissions
+                # AWS requires Resource: "*" for these actions
+                # Reference: https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarms.html
+                Resource: "*"
+
+  # Lambda subscription to raw alarm topic
+  RawAlarmSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn: !Ref RawAlarmTopic
+      Endpoint: !GetAtt NotificationProcessor.Arn
+
+  # Lambda permission for raw alarm topic
+  RawAlarmInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref NotificationProcessor
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref RawAlarmTopic
+
+  # Layer 1: Critical Quota Breach Detection
+  ClientErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-ClientErrors-Critical-${BedrockModelName}"
+      AlarmDescription: "Bedrock model client errors detected - investigation required"
+      MetricName: InvocationClientErrors
+      Namespace: AWS/Bedrock
+      Statistic: Sum
+      Period: !Ref AlarmEvaluationPeriod
+      EvaluationPeriods: !Ref CriticalAlarmEvaluationPeriods
+      Threshold: !Ref ErrorThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+      TreatMissingData: notBreaching
+
+  ServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-ServerErrors-Critical-${BedrockModelName}"
+      AlarmDescription: "Bedrock model service errors - AWS-side issue detected"
+      MetricName: InvocationServerErrors
+      Namespace: AWS/Bedrock
+      Statistic: Sum
+      Period: !Ref AlarmEvaluationPeriod
+      EvaluationPeriods: !Ref CriticalAlarmEvaluationPeriods
+      Threshold: !Ref ErrorThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+      TreatMissingData: notBreaching
+
+  ThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-Throttles-Critical-${BedrockModelName}"
+      AlarmDescription: "Bedrock model requests throttled - rate limit detected"
+      MetricName: InvocationThrottles
+      Namespace: AWS/Bedrock
+      Statistic: Sum
+      Period: !Ref AlarmEvaluationPeriod
+      EvaluationPeriods: !Ref CriticalAlarmEvaluationPeriods
+      Threshold: !Ref ErrorThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+      TreatMissingData: notBreaching
+
+  # Layer 2: Usage Rate Monitoring
+  HighInvocationRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: QuotaCalculatorCustomResource
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-HighInvocationRate-Warning-${BedrockModelName}"
+      AlarmDescription: "Bedrock model request rate approaching limits"
+      MetricName: Invocations
+      Namespace: AWS/Bedrock
+      Statistic: Sum
+      Period: !Ref AlarmEvaluationPeriod
+      EvaluationPeriods: !Ref WarningAlarmEvaluationPeriods
+      Threshold: !GetAtt QuotaCalculatorCustomResource.RpmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+      TreatMissingData: notBreaching
+
+  # EstimatedTPMQuotaUsage: Combined TPM quota consumption metric (includes cache write tokens and output burndown multipliers)
+  HighTPMQuotaUsageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn: QuotaCalculatorCustomResource
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-HighTPMQuotaUsage-Warning-${BedrockModelName}"
+      AlarmDescription: "Bedrock model estimated TPM quota consumption approaching limits"
+      MetricName: EstimatedTPMQuotaUsage
+      Namespace: AWS/Bedrock
+      Statistic: Sum
+      Period: !Ref AlarmEvaluationPeriod
+      EvaluationPeriods: !Ref WarningAlarmEvaluationPeriods
+      Threshold: !GetAtt QuotaCalculatorCustomResource.TpmThreshold
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+      TreatMissingData: notBreaching
+
+  HighLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-HighLatency-Warning-${BedrockModelName}"
+      AlarmDescription: "Bedrock model high latency detected - investigation required"
+      MetricName: InvocationLatency
+      Namespace: AWS/Bedrock
+      Statistic: Average
+      Period: !Ref LatencyAlarmPeriod
+      EvaluationPeriods: !Ref LatencyAlarmEvaluationPeriods
+      Threshold: !Ref LatencyThresholdMs
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+      TreatMissingData: notBreaching
+
+  # Layer 3: Anomaly Detection
+  InvocationAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
+    Properties:
+      MetricName: Invocations
+      Namespace: AWS/Bedrock
+      Stat: Sum
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+
+  InputTokenAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
+    Properties:
+      MetricName: InputTokenCount
+      Namespace: AWS/Bedrock
+      Stat: Sum
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+
+  OutputTokenAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
+    Properties:
+      MetricName: OutputTokenCount
+      Namespace: AWS/Bedrock
+      Stat: Sum
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+
+  LatencyAnomalyDetector:
+    Type: AWS::CloudWatch::AnomalyDetector
+    Properties:
+      MetricName: InvocationLatency
+      Namespace: AWS/Bedrock
+      Stat: Average
+      Dimensions:
+        - Name: ModelId
+          Value: !Ref BedrockModelId
+
+  InvocationAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-InvocationAnomaly-Warning-${BedrockModelName}"
+      AlarmDescription: "Bedrock model unusual request pattern detected"
+      # Request Validation (Smart Quota Guard): Only fire on upward deviations — downward anomalies
+      # (usage drops) are positive signals, not rate limit indicators
+      ComparisonOperator: GreaterThanUpperThreshold
+      EvaluationPeriods: !Ref AnomalyEvaluationPeriods
+      Metrics:
+        - Id: m1
+          MetricStat:
+            Metric:
+              MetricName: Invocations
+              Namespace: AWS/Bedrock
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref BedrockModelId
+            Period: !Ref AnomalyDetectionPeriod
+            Stat: Sum
+        - Id: ad1
+          Expression: !Sub "ANOMALY_DETECTION_BAND(m1, ${AnomalySensitivity})"
+      ThresholdMetricId: ad1
+      TreatMissingData: notBreaching
+
+  InputTokenAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-InputTokenAnomaly-Warning-${BedrockModelName}"
+      AlarmDescription: "Bedrock model unusual input token pattern detected"
+      # Request Validation (Smart Quota Guard): Only fire on upward deviations
+      ComparisonOperator: GreaterThanUpperThreshold
+      EvaluationPeriods: !Ref AnomalyEvaluationPeriods
+      Metrics:
+        - Id: m2
+          MetricStat:
+            Metric:
+              MetricName: InputTokenCount
+              Namespace: AWS/Bedrock
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref BedrockModelId
+            Period: !Ref AnomalyDetectionPeriod
+            Stat: Sum
+        - Id: ad2
+          Expression: !Sub "ANOMALY_DETECTION_BAND(m2, ${AnomalySensitivity})"
+      ThresholdMetricId: ad2
+      TreatMissingData: notBreaching
+
+  OutputTokenAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-OutputTokenAnomaly-Warning-${BedrockModelName}"
+      AlarmDescription: "Bedrock model unusual output token pattern detected"
+      # Request Validation (Smart Quota Guard): Only fire on upward deviations
+      ComparisonOperator: GreaterThanUpperThreshold
+      EvaluationPeriods: !Ref AnomalyEvaluationPeriods
+      Metrics:
+        - Id: m3
+          MetricStat:
+            Metric:
+              MetricName: OutputTokenCount
+              Namespace: AWS/Bedrock
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref BedrockModelId
+            Period: !Ref AnomalyDetectionPeriod
+            Stat: Sum
+        - Id: ad3
+          Expression: !Sub "ANOMALY_DETECTION_BAND(m3, ${AnomalySensitivity})"
+      ThresholdMetricId: ad3
+      TreatMissingData: notBreaching
+
+  LatencyAnomalyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-LatencyAnomaly-Warning-${BedrockModelName}"
+      AlarmDescription: "Bedrock model unusual latency pattern detected"
+      # Request Validation (Smart Quota Guard): Only fire on upward deviations — lower latency is good
+      ComparisonOperator: GreaterThanUpperThreshold
+      EvaluationPeriods: !Ref AnomalyEvaluationPeriods
+      Metrics:
+        - Id: m4
+          MetricStat:
+            Metric:
+              MetricName: InvocationLatency
+              Namespace: AWS/Bedrock
+              Dimensions:
+                - Name: ModelId
+                  Value: !Ref BedrockModelId
+            Period: !Ref AnomalyDetectionPeriod
+            Stat: Average
+        - Id: ad4
+          Expression: !Sub "ANOMALY_DETECTION_BAND(m4, ${AnomalySensitivity})"
+      ThresholdMetricId: ad4
+      TreatMissingData: notBreaching
+
+  # Composite Alarm for Overall Health
+  BedrockQuotaHealthAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    DependsOn:
+      - ClientErrorAlarm
+      - ServerErrorAlarm
+      - ThrottleAlarm
+      - HighInvocationRateAlarm
+      - HighTPMQuotaUsageAlarm
+      - HighLatencyAlarm
+      - InvocationAnomalyAlarm
+      - InputTokenAnomalyAlarm
+      - OutputTokenAnomalyAlarm
+      - LatencyAnomalyAlarm
+    Properties:
+      AlarmName: !Sub "${CustomerName}-Bedrock-QuotaHealth-Composite-${BedrockModelName}"
+      AlarmDescription: "Overall Bedrock model quota health status"
+      AlarmRule: !Sub >-
+        ALARM(${ClientErrorAlarm}) OR
+        ALARM(${ServerErrorAlarm}) OR
+        ALARM(${ThrottleAlarm}) OR
+        ALARM(${HighInvocationRateAlarm}) OR
+        ALARM(${HighTPMQuotaUsageAlarm}) OR
+        ALARM(${HighLatencyAlarm}) OR
+        ALARM(${InvocationAnomalyAlarm}) OR
+        ALARM(${InputTokenAnomalyAlarm}) OR
+        ALARM(${OutputTokenAnomalyAlarm}) OR
+        ALARM(${LatencyAnomalyAlarm})
+      AlarmActions:
+        - !Ref RawAlarmTopic
+      ActionsEnabled: true
+
+Outputs:
+  # --- Monitored Model ---
+  MonitoredModelId:
+    Description: "Bedrock model being monitored"
+    Value: !Ref BedrockModelId
+
+  # --- Encryption ---
+  BedrockOpsAlertEncryptionKeyId:
+    Description: "KMS key ID for Bedrock Ops Alert encryption"
+    Value: !Ref BedrockOpsAlertEncryptionKey
+  BedrockOpsAlertEncryptionKeyArn:
+    Description: "KMS key ARN for Bedrock Ops Alert encryption"
+    Value: !GetAtt BedrockOpsAlertEncryptionKey.Arn
+  BedrockOpsAlertEncryptionKeyAlias:
+    Description: "KMS key alias for Bedrock Ops Alert encryption"
+    Value: !Ref BedrockOpsAlertEncryptionKeyAlias
+
+  # --- SNS Topics ---
+  RawAlarmTopicArn:
+    Description: "Raw alarm topic ARN (Lambda only)"
+    Value: !Ref RawAlarmTopic
+  FormattedNotificationTopicArn:
+    Description: "Formatted notification topic ARN (Email subscribers)"
+    Value: !Ref FormattedNotificationTopic
+
+  # --- Composite Alarm ---
+  CompositeAlarmName:
+    Description: "Composite alarm for overall quota health"
+    Value: !Ref BedrockQuotaHealthAlarm
+
+  # --- Calculated Thresholds ---
+  CalculatedRpmThreshold:
+    Description: "Calculated RPM threshold based on quota and percentage"
+    Value: !GetAtt QuotaCalculatorCustomResource.RpmThreshold
+  CalculatedTpmThreshold:
+    Description: "Calculated combined TPM threshold (used by HighTPMQuotaUsage alarm and usage validation)"
+    Value: !GetAtt QuotaCalculatorCustomResource.TpmThreshold
+
+  # --- Layer 1: Critical Error Detection Configuration ---
+  ErrorThreshold:
+    Description: "Configured error count threshold per evaluation period"
+    Value: !Ref ErrorThreshold
+  CriticalAlarmEvaluationPeriods:
+    Description: "Configured consecutive periods before critical alarm triggers"
+    Value: !Ref CriticalAlarmEvaluationPeriods
+
+  # --- Layer 2: Usage Rate Monitoring Configuration ---
+  WarningAlarmEvaluationPeriods:
+    Description: "Configured consecutive periods before warning alarm triggers"
+    Value: !Ref WarningAlarmEvaluationPeriods
+  AlarmEvaluationPeriod:
+    Description: "Configured alarm evaluation period in seconds"
+    Value: !Ref AlarmEvaluationPeriod
+  LatencyThresholdMs:
+    Description: "Configured latency threshold in milliseconds"
+    Value: !Ref LatencyThresholdMs
+
+  # --- Layer 3: Anomaly Detection Configuration ---
+  AnomalySensitivity:
+    Description: "Configured anomaly detection sensitivity (1=most sensitive, 10=least)"
+    Value: !Ref AnomalySensitivity
+  AnomalyEvaluationPeriods:
+    Description: "Configured consecutive anomaly periods before alarm triggers"
+    Value: !Ref AnomalyEvaluationPeriods
+
+  # --- Automated Threshold Updates ---
+  AlarmUpdaterFunctionName:
+    Description: "Lambda function name for manually updating alarms after quota changes - Invoke this function after changing quotas"
+    Value: !Ref AlarmUpdater
+  ThresholdUpdateScheduleEnabled:
+    Description: "Whether automated threshold updates are enabled"
+    Value: !Ref EnableAutomatedThresholdUpdate
+  ThresholdUpdateInterval:
+    Description: "Automated threshold update interval in days"
+    Value: !Ref ThresholdUpdateScheduleIntervalDays
+
+  # --- Parameter Store Paths (updatable without stack updates) ---
+  NotificationPreferenceParameter:
+    Description: "Parameter Store path for notification preference - Update this parameter to change the value without stack updates"
+    Value: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/notification-preference"
+  EnableAutomatedSupportCaseParameter:
+    Description: "Parameter Store path for automated support case enablement - Update this parameter to change the value without stack updates"
+    Value: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/enable-automated-support-case"
+  TokensPerMinuteIncreasePercentParameter:
+    Description: "Parameter Store path for tokens per minute increase percentage - Update this parameter to change the value without stack updates"
+    Value: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/tokens-per-minute-increase-percent"
+  RequestsPerMinuteIncreasePercentParameter:
+    Description: "Parameter Store path for requests per minute increase percentage - Update this parameter to change the value without stack updates"
+    Value: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/requests-per-minute-increase-percent"
