@@ -25,6 +25,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from botocore.waiter import WaiterModel, create_waiter_with_client
 from botocore.exceptions import WaiterError
+from botocore.config import Config as BotoConfig
 from quota_utils import get_usage_metrics, get_stored_thresholds, determine_support_case_scenario, determine_case_type_suffix, CASE_TYPE_QUOTA_REQUEST, CASE_TYPE_INVESTIGATION_REQUEST, RPM_DISABLED_SENTINEL
 
 # Product name used in support case subject, email subject, body header, and duplicate detection
@@ -38,6 +39,12 @@ sns_client = boto3.client('sns')
 cloudwatch_client = boto3.client('cloudwatch')
 support_client = boto3.client('support')
 service_quotas_client = boto3.client('service-quotas')
+# Retry-configured client for Service Quotas write operations (prone to throttling)
+# Matches pattern from quota_utils.py validate_quota_codes()
+service_quotas_retry_client = boto3.client(
+    'service-quotas',
+    config=BotoConfig(retries={'mode': 'adaptive', 'max_attempts': 10})
+)
 
 def get_secret(secret_name):
     """Retrieve secret value from Secrets Manager. Returns 'Not available' on failure."""
@@ -46,6 +53,84 @@ def get_secret(secret_name):
     except Exception as e:
         logger.error(f"Failed to get secret: {str(e)}")
         return 'Not available'
+
+def _resolve_case_details(case_id):
+    """
+    Resolve displayId, subject, and timeCreated from a Support case ID.
+    Uses describe_cases API to get the human-readable case identifiers.
+    
+    Returns:
+        dict with 'display_id', 'subject', 'time_created'. Falls back to case_id on failure.
+    """
+    result = {'display_id': case_id, 'subject': '', 'time_created': ''}
+    try:
+        case_details = support_client.describe_cases(caseIdList=[case_id], includeResolvedCases=False)
+        cases = case_details.get('cases', [])
+        if cases:
+            result['display_id'] = cases[0].get('displayId', case_id)
+            result['subject'] = cases[0].get('subject', '')
+            result['time_created'] = cases[0].get('timeCreated', '')
+    except Exception as e:
+        logger.warning(f"Failed to resolve case details for {case_id}: {str(e)}")
+    return result
+
+
+def _resolve_display_id_to_case_id(display_id):
+    """
+    Convert a Service Quotas display ID (e.g., '178093546000760') to the internal
+    AWS Support caseId format (e.g., 'case-578707974125-muen-2026-XXXXX').
+    Service Quotas returns display IDs in its CaseId field; AWS Support API requires internal format.
+    
+    Returns:
+        Internal caseId string if found, None otherwise.
+    """
+    try:
+        case_details = support_client.describe_cases(displayId=display_id, includeResolvedCases=False)
+        cases = case_details.get('cases', [])
+        if cases:
+            internal_id = cases[0].get('caseId')
+            logger.info(f"Resolved display ID {display_id} to internal caseId: {internal_id}")
+            return internal_id
+    except Exception as e:
+        logger.warning(f"Failed to resolve display ID {display_id} to internal caseId: {str(e)}")
+    return None
+
+
+def _check_alarm_dedup(case_id, triggered_eligible):
+    """
+    Check if this alarm type should be suppressed (already communicated on this case).
+    Only anomaly and high-latency alarms are dedup-checked (frequent re-triggers).
+    Non-anomaly alarms (ServerErrors, Throttles, etc.) always proceed.
+    
+    Returns:
+        True if alarm should be suppressed, False if should proceed with append.
+    """
+    alarm_to_check = triggered_eligible[0] if triggered_eligible else ''
+    if not alarm_to_check:
+        return False
+    is_dedup_alarm = 'Anomaly' in alarm_to_check or 'HighLatency' in alarm_to_check
+    if is_dedup_alarm and has_alarm_already_appended(case_id, alarm_to_check):
+        logger.info(f"Alarm {alarm_to_check} already communicated on case {case_id} — suppressing")
+        return True
+    return False
+
+
+def _append_to_case(case_id, body):
+    """
+    Append communication body to an existing support case.
+    Logs success or failure. Returns True on success, False on failure.
+    """
+    try:
+        support_client.add_communication_to_case(
+            caseId=case_id,
+            communicationBody=body
+        )
+        logger.info(f"Appended communication to case: {case_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to append to case {case_id}: {str(e)}")
+        return False
+
 
 def has_alarm_already_appended(case_id, alarm_pattern):
     """
@@ -160,6 +245,292 @@ def handler(event, context):
     except Exception as e:
         logger.error(f"Error: {str(e)}")
         return {'statusCode': 500, 'body': str(e)}
+
+def request_quota_increase_via_service_quotas(alarm_ctx, quota_requests, usage_metrics, scenario, thresholds, case_type_suffix, triggered_eligible):
+    """
+    Deterministic quota path: Use Service Quotas API to request quota increase.
+    AWS auto-creates a support case (title: "Quota Increase: Bedrock"), then we
+    append our context body to that case.
+    
+    Called from create_support_case() Step 7.5 when deterministic quota alarms fire.
+    Falls back to existing create_case() path on any failure (returns None).
+    
+    Flow:
+      For each quota in quota_requests:
+        1. request_service_quota_increase(SupportCaseAllowed=True)
+        2. Extract CaseId from response
+        3. _append_to_case with full case_body (all quota details)
+      
+      On ResourceAlreadyExistsException (pending request exists):
+        1. list_requested_service_quota_change_history_by_quota → get CaseId
+        2. _check_alarm_dedup (suppress if already communicated)
+        3. _append_to_case if not duplicate
+    
+    Returns:
+        case_result dict on success, None on failure (triggers fallback to existing path)
+    """
+    if not quota_requests:
+        return None
+    
+    # Case subject for the return dict (auto-created case title is "Quota Increase: Bedrock")
+    case_subject = "Quota Increase: Bedrock"
+    
+    # Process first quota via Service Quotas API — remaining quotas are included
+    # in the case_body context (build_msg_body receives full quota_requests list).
+    # Early return on first success/failure is intentional.
+    for quota in quota_requests:
+        try:
+            logger.info(f"Requesting quota increase via Service Quotas API: {quota['code']} -> {quota['new']}")
+            response = service_quotas_retry_client.request_service_quota_increase(
+                ServiceCode='bedrock',
+                QuotaCode=quota['code'],
+                DesiredValue=float(quota['new']),
+                SupportCaseAllowed=True
+            )
+            
+            requested_quota = response.get('RequestedQuota', {})
+            request_id = requested_quota.get('Id')
+            case_id = requested_quota.get('CaseId')
+            status = requested_quota.get('Status', '')
+            logger.info(f"Quota increase request submitted: status={status}, request_id={request_id}, case_id={case_id}")
+            
+            if not request_id:
+                logger.warning(f"No RequestId returned for quota {quota['code']} — falling back")
+                return None
+            
+            # CaseId may not be in the immediate response (async lag ~1-2s).
+            # Use custom waiter on GetRequestedServiceQuotaChange to poll until CaseId appears.
+            if not case_id:
+                logger.info(f"CaseId not in immediate response — waiting for async case creation")
+                case_id = _wait_for_quota_case_id(request_id)
+                logger.info(f"Post waiter found service quota case id: {case_id}")
+            
+            if not case_id:
+                # Quota is successfully queued but no case available yet.
+                # Do NOT fall back to create_case (would create duplicate).
+                logger.info(f"Quota increase submitted (request_id={request_id}) but no CaseId available — returning without append")
+                return {
+                    'case_id': None, 'display_id': request_id,
+                    'subject': "Quota Increase: Bedrock",
+                    'case_type_suffix': case_type_suffix, 'scenario': scenario,
+                    'is_append': False, 'quotas': quota_requests,
+                    'quota_request_id': request_id
+                }
+            
+            # CaseId found — Service Quotas returns displayId format, resolve to internal caseId
+            case_id = _resolve_display_id_to_case_id(case_id)
+            if not case_id:
+                logger.warning("Could not resolve display ID to internal caseId — returning without append")
+                return {
+                    'case_id': None, 'display_id': request_id,
+                    'subject': "Quota Increase: Bedrock",
+                    'case_type_suffix': case_type_suffix, 'scenario': scenario,
+                    'is_append': False, 'quotas': quota_requests,
+                    'quota_request_id': request_id
+                }
+            
+            details = _resolve_case_details(case_id)
+            display_id = details['display_id']
+            case_subject = details['subject'] if details['subject'] else "Quota Increase: Bedrock"
+            
+            # Wait for AWS Support automation reply before appending our context.
+            # Service Quotas cases get an auto-reply (~60s) asking for info. If we append
+            # before that, our data doesn't register as a "reply" and case stays pending.
+            # Wait up to 2 min, then append anyway if automation doesn't fire.
+            _wait_for_support_automation_reply(case_id)
+            
+            case_body = build_msg_body(alarm_ctx, quota_requests, usage_metrics, scenario, thresholds)
+            _append_to_case(case_id, case_body)
+            
+            return {
+                'case_id': case_id, 'display_id': display_id, 'subject': case_subject,
+                'case_type_suffix': case_type_suffix, 'scenario': scenario,
+                'is_append': False, 'quotas': quota_requests
+            }
+        
+        except service_quotas_retry_client.exceptions.ResourceAlreadyExistsException:
+            logger.info("At service_quotas_retry_client.exceptions.ResourceAlreadyExistsException")
+            # Pending request already exists for this quota — find the case and append
+            logger.info(f"Pending quota request already exists for {quota['code']} — looking up case")
+            try:
+                case_id = _get_pending_quota_request_case_id(quota['code'])
+                logger.info(f"Post polling found service quota case id: {case_id}")
+                if not case_id:
+                    logger.warning(f"Could not find CaseId for pending request {quota['code']} — falling back")
+                    return None
+                
+                # Service Quotas returns displayId format — resolve to internal caseId
+                case_id = _resolve_display_id_to_case_id(case_id)
+                if not case_id:
+                    logger.warning("Could not resolve display ID to internal caseId — falling back")
+                    return None
+                
+                # Resolve case details
+                details = _resolve_case_details(case_id)
+                display_id = details['display_id']
+                time_created = details['time_created']
+                case_subject = details['subject'] if details['subject'] else "Quota Increase: Bedrock"
+                
+                # Dedup: check if this alarm type was already appended
+                if _check_alarm_dedup(case_id, triggered_eligible):
+                    return {
+                        'case_id': case_id, 'display_id': display_id,
+                        'subject': case_subject, 'case_type_suffix': case_type_suffix,
+                        'scenario': scenario, 'is_suppressed': True,
+                        'time_created': time_created, 'quotas': quota_requests
+                    }
+                
+                # Append context to existing case
+                case_body = build_msg_body(alarm_ctx, quota_requests, usage_metrics, scenario, thresholds, is_append=True)
+                _append_to_case(case_id, case_body)
+                
+                return {
+                    'case_id': case_id, 'display_id': display_id,
+                    'subject': case_subject, 'case_type_suffix': case_type_suffix,
+                    'scenario': scenario, 'is_append': True,
+                    'time_created': time_created, 'quotas': quota_requests
+                }
+            except Exception as e:
+                logger.error(f"Failed to handle existing quota request for {quota['code']}: {str(e)}")
+                return None
+        
+        except Exception as e:
+            logger.error(f"Service Quotas API failed for {quota['code']}: {str(e)}")
+            return None
+    
+    return None
+
+
+def _wait_for_support_automation_reply(case_id):
+    """
+    Wait for AWS Support automation reply on a newly created Service Quotas case.
+    
+    Service Quotas cases receive an automated reply (~60s after creation) from
+    "Amazon Web Services" asking for additional info. Appending our context AFTER
+    this reply ensures it registers as a customer response, moving the case from
+    'pending-customer-action' to 'pending-amazon-action'.
+    
+    Only called for first-time service quota case creation (not appends to existing cases).
+    
+    Polls describe_communications every 5s, max 2 minutes.
+    If automation doesn't fire within 2 min, returns anyway (append proceeds regardless).
+    Throttle errors are handled defensively — polling continues on any exception.
+    """
+    import time
+    max_attempts = 150     # 150 × 2s = 300s (5 minutes)
+    delay_seconds = 2
+    
+    logger.info(f"Waiting for AWS Support automation reply on case {case_id}...")
+    
+    for attempt in range(max_attempts):
+        time.sleep(delay_seconds)
+        
+        try:
+            paginator = support_client.get_paginator('describe_communications')
+            for page in paginator.paginate(caseId=case_id):
+                for comm in page.get('communications', []):
+                    if comm.get('submittedBy') == 'Amazon Web Services':
+                        logger.info(f"AWS Support automation replied on case {case_id} (attempt {attempt + 1})")
+                        return
+        except Exception as e:
+            # Throttle or transient error — continue polling, don't abort.
+            # 5s interval is generous; transient failures recover on next attempt.
+            logger.warning(f"Failed to check communications on case {case_id} (attempt {attempt + 1}): {str(e)}")
+    
+    # Timeout — automation didn't fire within 2 min. Append anyway.
+    logger.info(f"AWS Support automation did not reply within 2 min on case {case_id} — proceeding with append")
+
+
+def _get_pending_quota_request_case_id(quota_code):
+    """
+    Retrieve CaseId from a pending/open quota increase request for a specific quota code.
+    Uses botocore waiter pattern (no time.sleep) for delay between attempts.
+    CaseId is populated asynchronously (~1-2s after request_service_quota_increase).
+    
+    Returns:
+        CaseId string if found, None otherwise.
+    """
+    # Waiter for 2-second delay between checks (same pattern as poll_until_composite_ok)
+    waiter_config = {
+        "version": 2,
+        "waiters": {
+            "CaseIdDelay": {
+                "operation": "DescribeAlarms",
+                "delay": 2,
+                "maxAttempts": 3,
+                "acceptors": [{"matcher": "status", "expected": 200, "state": "success"}]
+            }
+        }
+    }
+    delay_waiter = create_waiter_with_client('CaseIdDelay', WaiterModel(waiter_config), cloudwatch_client)
+    
+    max_attempts = 3
+    attempt = 0
+    
+    while attempt < max_attempts:
+        for status in ['PENDING', 'CASE_OPENED']:
+            try:
+                response = service_quotas_retry_client.list_requested_service_quota_change_history_by_quota(
+                    ServiceCode='bedrock',
+                    QuotaCode=quota_code,
+                    Status=status
+                )
+                requests = response.get('RequestedQuotas', [])
+                if requests:
+                    case_id = requests[0].get('CaseId')
+                    if case_id:
+                        logger.info(f"Found {status} quota request for {quota_code}: CaseId={case_id} (attempt {attempt + 1})")
+                        return case_id
+            except Exception as e:
+                logger.warning(f"Failed to list {status} quota requests for {quota_code}: {str(e)}")
+        
+        attempt += 1
+        if attempt < max_attempts:
+            logger.info(f"CaseId not available yet (attempt {attempt}/{max_attempts}) — waiting 2s")
+            try:
+                delay_waiter.wait(AlarmNames=['_delay_only'])
+            except WaiterError:
+                pass  # Waiter timeout is expected — we just want the delay
+    
+    return None
+
+
+def _wait_for_quota_case_id(request_id):
+    """
+    Wait for CaseId to become available on a quota increase request.
+    CaseId is populated asynchronously (~1-2s after request_service_quota_increase).
+    Uses time.sleep for delay between polls.
+    
+    Args:
+        request_id: The quota increase request ID from request_service_quota_increase response.
+    
+    Returns:
+        CaseId string if found, None if max attempts exceeded.
+    """
+    import time
+    max_attempts = 10
+    delay_seconds = 2
+    
+    logger.info(f"Waiting for CaseId on quota request {request_id}...")
+    
+    while max_attempts > 0:
+        time.sleep(delay_seconds)
+        
+        try:
+            response = service_quotas_retry_client.get_requested_service_quota_change(RequestId=request_id)
+            case_id = response.get('RequestedQuota', {}).get('CaseId')
+            if case_id:
+                logger.info(f"CaseId found: {case_id}")
+                return case_id
+        except Exception as e:
+            logger.warning(f"Failed to get quota request status: {str(e)}")
+        
+        max_attempts -= 1
+        if max_attempts > 0:
+            logger.info(f"CaseId not available yet ({max_attempts} attempts remaining)")
+    
+    return None
+
 
 def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, thresholds):
     """
@@ -278,7 +649,13 @@ def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, th
         rpm_alarms = os.environ.get('RPM_ALARM_PATTERNS', 'HighInvocationRate,InvocationAnomaly').split(',')
         tpm_alarms = os.environ.get('TPM_ALARM_PATTERNS', 'HighTPMQuotaUsage,InputTokenAnomaly,OutputTokenAnomaly').split(',')
         
-        # Smart Quota Guard: Only Throttles and ClientErrors are ambiguous quota alarms.
+        # Deterministic quota alarms: alarms that definitively indicate quota consumption.
+        # RPM alarms (request rate), TPM alarms (token rate), and Throttles (HTTP 429 = quota exceeded).
+        # Reference: https://docs.aws.amazon.com/bedrock/latest/userguide/scaling-throughput-best-practices.html
+        deterministic_quota_alarms = rpm_alarms + tpm_alarms
+        
+        # Smart Quota Guard: Throttles and ClientErrors trigger both RPM+TPM increases
+        # because the specific quota breached cannot be determined from the metric alone.
         # ServerErrors, HighLatency, LatencyAnomaly are NOT quota-related.
         unknown_quota_alarms = ['Throttles-Critical', 'ClientErrors-Critical']
         has_unknown_quota_issue = any(alarm in reason_text for alarm in unknown_quota_alarms)
@@ -303,6 +680,22 @@ def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, th
         
         case_subject = f"{customer_name} - {PRODUCT_NAME} - {model_name} - {case_type_suffix}"
         
+        # --- Step 7.5: Deterministic quota path via Service Quotas API ---
+        # For alarms that definitively indicate quota consumption, use request_service_quota_increase
+        # which auto-creates a properly categorized support case. Falls back to Step 8+9 on failure.
+        has_deterministic_quota_alarm = any(
+            alarm in reason_text for alarm in deterministic_quota_alarms
+        )
+        
+        if has_deterministic_quota_alarm:
+            result = request_quota_increase_via_service_quotas(
+                alarm_ctx, quota_requests, usage_metrics, scenario,
+                thresholds, case_type_suffix, triggered_eligible
+            )
+            if result:
+                return result
+            logger.info("Service Quotas API path failed — falling back to create_case()")
+        
         # --- Step 8: Duplicate detection — append to existing case if found ---
         try:
             lookback_days = int(os.environ.get('SUPPORT_CASE_LOOKBACK_DAYS', '60'))
@@ -318,12 +711,7 @@ def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, th
                     logger.info(f"Existing unresolved {case_type_suffix} case found: {existing_display_id}, raised {existing_time}")
                     
                     # Dedup: Check if this specific alarm type was already appended to this case
-                    # Only suppress repeated appends for anomaly and high-latency alarms (frequent re-triggers)
-                    # Non-anomaly alarms (ServerErrors, Throttles, etc.) always append
-                    alarm_to_check = triggered_eligible[0] if triggered_eligible else ''
-                    is_dedup_alarm = 'Anomaly' in alarm_to_check or 'HighLatency' in alarm_to_check
-                    if is_dedup_alarm and has_alarm_already_appended(existing_case_id, alarm_to_check):
-                        logger.info(f"Alarm {alarm_to_check} already communicated on case {existing_display_id} — suppressing append")
+                    if _check_alarm_dedup(existing_case_id, triggered_eligible):
                         return {
                             'case_id': existing_case_id, 'display_id': existing_display_id,
                             'subject': case.get('subject', case_subject), 'case_type_suffix': case_type_suffix,
@@ -334,15 +722,7 @@ def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, th
                     # Not previously appended — proceed with append
                     logger.info(f"Appending update to case {existing_display_id}")
                     append_body = build_msg_body(alarm_ctx, quota_requests, usage_metrics, scenario, thresholds, is_append=True)
-                    
-                    try:
-                        support_client.add_communication_to_case(
-                            caseId=existing_case_id,
-                            communicationBody=append_body
-                        )
-                        logger.info(f"Appended communication to existing case: {existing_display_id}")
-                    except Exception as e:
-                        logger.error(f"Failed to append to existing case {existing_display_id}: {str(e)}")
+                    _append_to_case(existing_case_id, append_body)
                     
                     return {
                         'case_id': existing_case_id, 'display_id': existing_display_id,
@@ -369,14 +749,8 @@ def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, th
             logger.info(f"Created case: {case_id}")
             
             # Retrieve displayId — caseId and displayId are different per AWS docs
-            display_id = case_id
-            try:
-                case_details = support_client.describe_cases(caseIdList=[case_id], includeResolvedCases=False)
-                cases = case_details.get('cases', [])
-                if cases:
-                    display_id = cases[0].get('displayId', case_id)
-            except Exception as e:
-                logger.warning(f"Failed to get displayId, using caseId: {str(e)}")
+            details = _resolve_case_details(case_id)
+            display_id = details['display_id']
             
             return {
                 'case_id': case_id, 'display_id': display_id, 'subject': case_subject,

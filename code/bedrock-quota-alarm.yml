@@ -466,7 +466,7 @@ Resources:
         ZipFile: |
           import json
           import urllib3
-          from quota_utils import calculate_thresholds, store_in_parameter_store
+          from quota_utils import validate_quota_codes, calculate_thresholds, store_in_parameter_store
           
           http = urllib3.PoolManager()
           
@@ -499,6 +499,10 @@ Resources:
                       tpm_percent = float(props['TokensPerMinuteThresholdPercent'])
                       customer_name = props['CustomerName']
                       model_name = props['BedrockModelName']
+                      model_id = props['BedrockModelId']
+                      print('Validating quota codes for model: ' + model_id)
+                      validate_quota_codes(rpm_quota_code, tpm_quota_code, model_id)
+                      print('Quota code validation passed')
                       print('Calculating thresholds: RPM=' + str(rpm_percent) + '%, TPM=' + str(tpm_percent) + '%')
                       thresholds = calculate_thresholds(rpm_quota_code, tpm_quota_code, rpm_percent, tpm_percent)
                       print('Calculated thresholds: ' + json.dumps(thresholds))
@@ -512,6 +516,9 @@ Resources:
                   elif request_type == 'Delete':
                       print('Delete request - no action needed')
                       send_response(event, context, 'SUCCESS', reason='Delete completed', physical_id=event.get('PhysicalResourceId', context.log_stream_name))
+              except ValueError as ve:
+                  print('Validation Error: ' + str(ve))
+                  send_response(event, context, 'FAILED', reason='Quota code validation failed: ' + str(ve), physical_id=context.log_stream_name)
               except Exception as e:
                   print('Error: ' + str(e))
                   import traceback
@@ -521,7 +528,7 @@ Resources:
   QuotaCalculatorRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${CustomerName}-Quota-Calculator-Role-${BedrockModelName}"
+      RoleName: !Sub "${CustomerName}-Quota-Calculator-Role-${BedrockModelName}-${AWS::Region}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -539,8 +546,11 @@ Resources:
               - Effect: Allow
                 Action:
                   - servicequotas:GetServiceQuota
+                  - servicequotas:ListServiceQuotas
                 # Note: Service Quotas API does not support resource-level permissions
-                # AWS requires Resource: "*" for this action
+                # for ListServiceQuotas. GetServiceQuota supports quota ARN but requires
+                # knowing codes in advance (defeats validation purpose).
+                # AWS requires Resource: "*" for these actions
                 # Reference: https://docs.aws.amazon.com/servicequotas/latest/userguide/identity-access-management.html
                 Resource: "*"
         - PolicyName: ParameterStorePolicy
@@ -565,6 +575,7 @@ Resources:
       TokensPerMinuteThresholdPercent: !Ref TokensPerMinuteThresholdPercent
       CustomerName: !Ref CustomerName
       BedrockModelName: !Ref BedrockModelName
+      BedrockModelId: !Ref BedrockModelId
 
   # Lambda for updating alarms when quotas change
   AlarmUpdater:
@@ -648,7 +659,7 @@ Resources:
   AlarmUpdaterRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${CustomerName}-Alarm-Updater-Role-${BedrockModelName}"
+      RoleName: !Sub "${CustomerName}-Alarm-Updater-Role-${BedrockModelName}-${AWS::Region}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -825,7 +836,7 @@ Resources:
   EmailSubscriptionManagerRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${CustomerName}-Email-Subscription-Role-${BedrockModelName}"
+      RoleName: !Sub "${CustomerName}-Email-Subscription-Role-${BedrockModelName}-${AWS::Region}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -900,7 +911,7 @@ Resources:
   NotificationProcessorRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${CustomerName}-Bedrock-Processor-Role-${BedrockModelName}"
+      RoleName: !Sub "${CustomerName}-Bedrock-Processor-Role-${BedrockModelName}-${AWS::Region}"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -960,10 +971,31 @@ Resources:
                 Action:
                   - servicequotas:GetServiceQuota
                   - servicequotas:ListServiceQuotas
+                  - servicequotas:GetRequestedServiceQuotaChange
                 # Note: Service Quotas API does not support resource-level permissions
-                # AWS requires Resource: "*" for these actions
+                # for Get/List actions. AWS requires Resource: "*"
                 # Reference: https://docs.aws.amazon.com/servicequotas/latest/userguide/identity-access-management.html
                 Resource: "*"
+              - Effect: Allow
+                Action:
+                  - servicequotas:RequestServiceQuotaIncrease
+                # RequestServiceQuotaIncrease supports resource-level permissions (quota ARN)
+                # and servicequotas:service condition key
+                Resource:
+                  - !Sub "arn:aws:servicequotas:${AWS::Region}:${AWS::AccountId}:bedrock/${TokensPerMinuteQuotaCode}"
+                  - !Sub "arn:aws:servicequotas:${AWS::Region}:${AWS::AccountId}:bedrock/${RequestsPerMinuteQuotaCode}"
+                Condition:
+                  StringEquals:
+                    servicequotas:service: bedrock
+              - Effect: Allow
+                Action:
+                  - servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota
+                # ListRequestedServiceQuotaChangeHistoryByQuota does NOT support resource-level permissions
+                # AWS requires Resource: "*". Scoped via condition key to bedrock only.
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    servicequotas:service: bedrock
         - PolicyName: SupportPolicy
           PolicyDocument:
             Version: "2012-10-17"
