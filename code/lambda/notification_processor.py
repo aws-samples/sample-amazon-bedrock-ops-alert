@@ -899,6 +899,9 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
     """
     is_ops = audience == 'ops_team'
     
+    # Determine if a support case was actually created/found
+    has_case = case_result is not None and bool(case_result.get('case_id'))
+    
     # Header differs for appended communications vs new cases
     if is_append:
         body = f"Amazon {PRODUCT_NAME} - Automated Update\n\n"
@@ -921,8 +924,10 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         if is_ops:
             if is_append:
                 body += f"EXECUTIVE SUMMARY:\nAn additional issue has been detected while the previously reported alarm in this case remains unresolved. {base_issue}. The existing support case has been updated instructing the support engineer to investigate this new alarm together with the previously reported alarm, expedite permanent fix at service level and provide alternate solution until permanent fix. Please monitor the support case and engage with the support engineer for remediation.\n\n"
-            else:
+            elif has_case:
                 body += f"EXECUTIVE SUMMARY:\n{base_issue}. A support case has been raised instructing the support engineer to investigate root cause, expedite permanent fix at service level and provide alternate solution until permanent fix. Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += f"EXECUTIVE SUMMARY:\n{base_issue}. Automated support case creation is disabled. Please investigate the alarm to determine root cause, expedite permanent fix at service level and provide alternate solution until permanent fix.\n\n"
         else:
             body += f"EXECUTIVE SUMMARY:\n{append_prefix}{base_issue}. Please investigate the triggering alarm to determine root cause, expedite permanent fix at service level and provide alternate solution until permanent fix.\n\n"
     elif scenario == 'low_usage':
@@ -932,8 +937,10 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         if is_ops:
             if is_append:
                 body += f"EXECUTIVE SUMMARY:\nAn additional issue has been detected while the previously reported alarm in this case remains unresolved. {base_issue} but usage metrics do not indicate sustained quota consumption. The existing support case has been updated instructing the support engineer to investigate the triggering alarm ({triggered_alarms}) together with the previously reported alarm and determine root cause first. Please monitor the support case and engage with the support engineer for remediation.\n\n"
-            else:
+            elif has_case:
                 body += f"EXECUTIVE SUMMARY:\n{base_issue} but usage metrics do not indicate sustained quota consumption. A support case has been raised instructing the support engineer to investigate the triggering alarm ({triggered_alarms}) and determine root cause first. Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += f"EXECUTIVE SUMMARY:\n{base_issue} but usage metrics do not indicate sustained quota consumption. Automated support case creation is disabled. Please investigate the triggering alarm ({triggered_alarms}) and determine root cause first.\n\n"
         else:
             body += f"EXECUTIVE SUMMARY:\n{append_prefix}{base_issue} but usage metrics do not indicate sustained quota consumption. Please investigate the triggering alarm ({triggered_alarms}) to determine root cause first. If investigation confirms this is quota-related, quota increase details are provided below for reference which you can use to increase quota without waiting for additional confirmation.\n\n"
     elif scenario == 'new_model':
@@ -941,8 +948,10 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         if is_ops:
             if is_append:
                 body += f"EXECUTIVE SUMMARY:\nAn additional issue has been detected while the previously reported alarm in this case remains unresolved. Our Bedrock AI model ({alarm_ctx['model_name']}) is newly deployed with limited usage history and is experiencing issues. The existing support case has been updated instructing the support engineer to investigate and proceed with quota increase if needed. Please monitor the support case and engage with the support engineer for remediation.\n\n"
-            else:
+            elif has_case:
                 body += f"EXECUTIVE SUMMARY:\nOur Bedrock AI model ({alarm_ctx['model_name']}) is newly deployed with limited usage history and is experiencing issues. A support case has been raised instructing the support engineer to investigate and proceed with quota increase if needed. Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += f"EXECUTIVE SUMMARY:\nYour Bedrock AI model ({alarm_ctx['model_name']}) is newly deployed with limited usage history and is experiencing issues. Automated support case creation is disabled. Please investigate the triggering alarm ({triggered_alarms}) to determine root cause and request quota increase manually if needed.\n\n"
         else:
             body += f"EXECUTIVE SUMMARY:\n{append_prefix}Our Bedrock AI model ({alarm_ctx['model_name']}) is newly deployed with limited usage history and is experiencing issues. Please investigate the triggering alarm ({triggered_alarms}) to determine root cause. If it is quota-related, increase the limit(s) as requested below.\n\n"
     elif scenario == 'high_usage':
@@ -952,8 +961,10 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
             base_issue = base_summary.split('. Please investigate')[0] if '. Please investigate' in base_summary else base_summary.split('. Immediate')[0]
             if is_append:
                 body += f"EXECUTIVE SUMMARY:\nAn additional issue has been detected while the previously reported alarm in this case remains unresolved. {base_issue}. The existing support case has been updated instructing the support engineer to proceed with quota increase without waiting for additional confirmation. Please monitor the support case and engage with the support engineer for remediation.\n\n"
-            else:
+            elif has_case:
                 body += f"EXECUTIVE SUMMARY:\n{base_issue}. A support case has been raised instructing the support engineer to proceed with quota increase without waiting for additional confirmation. Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += f"EXECUTIVE SUMMARY:\n{base_issue}. Automated support case creation is disabled. Please request a quota increase manually via the AWS Support console or contact your AWS TAM/SA.\n\n"
         else:
             # Support engineer: direct instruction with assertive tone
             if 'increase the limit(s) as requested below.' in base_summary:
@@ -1000,8 +1011,10 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         if is_ops:
             if is_append:
                 body += "ACTION REQUESTED:\nThe existing support case has been updated instructing the support engineer to investigate this new alarm together with the previously reported alarm, expedite permanent fix and provide alternate solution until permanent fix. Please monitor the support case and engage with the support engineer for remediation.\n\n"
-            else:
+            elif has_case:
                 body += "ACTION REQUESTED:\nAn automated support case has been raised instructing the support engineer to investigate the issue from the service side, expedite permanent fix and provide alternate solution until permanent fix. Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += "ACTION REQUESTED:\nAutomated support case creation is disabled. Please investigate the issue from the service side, raise a support case manually if needed, and engage with AWS Support for remediation.\n\n"
         else:
             body += f"ACTION REQUESTED:\n{action_prefix}This is an automated alert generated by our monitoring system. Please investigate the issue from the service side, expedite permanent fix at service level and provide alternate solution until permanent fix.\n\n"
     elif scenario == 'low_usage' and quota_requests:
@@ -1018,8 +1031,10 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         if is_ops:
             if is_append:
                 body += "ACTION REQUESTED:\nThe existing support case has been updated instructing the support engineer to investigate the alarm root cause first. If confirmed quota-related, the support engineer has been provided quota increase details for reference. Please monitor the support case and engage with the support engineer for remediation.\n\n"
-            else:
+            elif has_case:
                 body += "ACTION REQUESTED:\nAn automated support case has been raised instructing the support engineer to investigate the alarm root cause first. If confirmed quota-related, the support engineer has been provided quota increase details for reference. Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += "ACTION REQUESTED:\nAutomated support case creation is disabled. Please investigate the alarm root cause first. If confirmed quota-related, request a quota increase manually via the AWS Support console using the details above.\n\n"
         else:
             body += f"ACTION REQUESTED:\n{action_prefix}This is an automated alert generated by our monitoring system. Usage metrics do not indicate sustained quota consumption at this time. Please investigate the alarm root cause first. If your investigation confirms this is a quota-related issue, the quota increase details above are provided for your reference. All required details — current usage, quota values, and requested increases — included above are accurate and verified. Please proceed with the quota increase as specified without additional confirmation.\n\n"
     elif scenario == 'new_model' and quota_requests:
@@ -1032,8 +1047,10 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         if is_ops:
             if is_append:
                 body += "ACTION REQUESTED:\nThe existing support case has been updated instructing the support engineer to proceed with the quota increase for this newly deployed model. Please monitor the support case and engage with the support engineer for remediation.\n\n"
-            else:
+            elif has_case:
                 body += "ACTION REQUESTED:\nAn automated support case has been raised instructing the support engineer to proceed with the quota increase for this newly deployed model. Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += "ACTION REQUESTED:\nAutomated support case creation is disabled. Please investigate the alarm for this newly deployed model and request a quota increase manually via the AWS Support console if needed.\n\n"
         else:
             body += f"ACTION REQUESTED:\n{action_prefix}This is an automated quota increase request generated by our monitoring system. This model is newly deployed with limited usage history, so usage-based validation could not be performed. We have intentionally configured and enabled this automation to streamline quota management. Please proceed with the quota increase as specified without additional confirmation.\n\n"
     elif quota_requests:
@@ -1046,11 +1063,19 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         if is_ops:
             if is_append:
                 body += "ACTION REQUESTED:\nThe existing support case has been updated instructing the support engineer to proceed with the quota increase without waiting for additional confirmation."
-            else:
+                if alarm_ctx.get('severity') == 'CRITICAL':
+                    body += " Service is actively impacted — expedited processing has been requested."
+                body += " Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            elif has_case:
                 body += "ACTION REQUESTED:\nAn automated support case has been raised instructing the support engineer to proceed with the quota increase without waiting for additional confirmation."
-            if alarm_ctx.get('severity') == 'CRITICAL':
-                body += " Service is actively impacted — expedited processing has been requested."
-            body += " Please monitor the support case and engage with the support engineer for remediation.\n\n"
+                if alarm_ctx.get('severity') == 'CRITICAL':
+                    body += " Service is actively impacted — expedited processing has been requested."
+                body += " Please monitor the support case and engage with the support engineer for remediation.\n\n"
+            else:
+                body += "ACTION REQUESTED:\nAutomated support case creation is disabled. Please request a quota increase manually via the AWS Support console or contact your AWS TAM/SA for escalation."
+                if alarm_ctx.get('severity') == 'CRITICAL':
+                    body += " Service is actively impacted — expedited action is needed."
+                body += "\n\n"
         else:
             body += f"ACTION REQUESTED:\n{action_prefix}This is an automated quota increase request generated by our monitoring system. We have intentionally configured and enabled this automation to streamline quota management and reduce resolution time by eliminating manual back-and-forth. All required details — current usage, quota values, and requested increases — included above are accurate and verified. Please proceed with the quota increase as specified without additional confirmation."
             if alarm_ctx.get('severity') == 'CRITICAL':
@@ -1190,12 +1215,20 @@ def send_email_notification(event, context, alarm_ctx=None, case_result=None, ca
             # Scenario-aware recommended actions
             if scenario == 'non_quota':
                 enhanced_message += "RECOMMENDED ACTIONS:\n"
-                enhanced_message += "1. Monitor the support case and engage with the support engineer\n"
-                enhanced_message += "2. Review CloudWatch Alarms and metrics for error patterns\n"
-                enhanced_message += "3. Document application impacts for the support case\n\n"
+                if case_result and case_result.get('case_id'):
+                    enhanced_message += "1. Monitor the support case and engage with the support engineer\n"
+                    enhanced_message += "2. Review CloudWatch Alarms and metrics for error patterns\n"
+                    enhanced_message += "3. Document application impacts for the support case\n\n"
+                else:
+                    enhanced_message += "1. Investigate the alarm directly via CloudWatch console\n"
+                    enhanced_message += "2. Review CloudWatch Alarms and metrics for error patterns\n"
+                    enhanced_message += "3. Document application impacts\n\n"
             else:
                 enhanced_message += "RECOMMENDED ACTIONS:\n"
-                enhanced_message += "1. Monitor the support case and engage with the support engineer\n"
+                if case_result and case_result.get('case_id'):
+                    enhanced_message += "1. Monitor the support case and engage with the support engineer\n"
+                else:
+                    enhanced_message += "1. Investigate the alarm directly via CloudWatch console\n"
                 enhanced_message += "2. Contact AWS TAM/SA for quota increase escalation if needed\n"
                 enhanced_message += "3. Review CloudWatch Alarms and metrics for usage patterns\n"
                 enhanced_message += "4. Document application impacts\n\n"
