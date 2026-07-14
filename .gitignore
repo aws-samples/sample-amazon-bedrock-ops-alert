@@ -1,0 +1,203 @@
+# ============================================
+# Lambda Deployment Packages
+# ============================================
+*.zip
+code/lambda/notification_processor.zip
+code/quota_utils_layer.zip
+
+# ============================================
+# Python
+# ============================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+env.bak/
+venv.bak/
+
+# ============================================
+# AWS
+# ============================================
+# SAM
+.aws-sam/
+
+# CDK
+.cdk.staging/
+cdk.out/
+
+# Lambda responses
+response.json
+*.response.json
+
+# CloudFormation
+*.template.json
+
+# Credentials (should never be committed)
+*credentials*
+*secrets*
+.aws/
+
+# ============================================
+# IDE & Editors
+# ============================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm / IntelliJ
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+.*.sw[a-z]
+*.un~
+Session.vim
+
+# Emacs
+*~
+\#*\#
+.\#*
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# ============================================
+# Logs
+# ============================================
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============================================
+# Environment Variables
+# ============================================
+.env
+.env.local
+.env.*.local
+.envrc
+
+# ============================================
+# Temporary Files
+# ============================================
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+.~*
+
+# ============================================
+# Node.js (if used for tooling)
+# ============================================
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json
+yarn.lock
+
+# ============================================
+# Documentation Build Artifacts
+# ============================================
+site/
+docs/_build/
+
+# ============================================
+# Terraform (if used)
+# ============================================
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# ============================================
+# Project Specific
+# ============================================
+# Exclude any local testing scripts
+test-local.sh
+local-*.sh
+tests/
+AppSec/
+
+# Exclude any personal notes
+NOTES.md
+TODO.md
+BLOG.md
+scratch/
+
+.kiro/
+
+.threatmodel/
+

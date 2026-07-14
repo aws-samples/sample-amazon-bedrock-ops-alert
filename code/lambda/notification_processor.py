@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from botocore.waiter import WaiterModel, create_waiter_with_client
 from botocore.exceptions import WaiterError
 from botocore.config import Config as BotoConfig
-from quota_utils import get_usage_metrics, get_stored_thresholds, determine_support_case_scenario, determine_case_type_suffix, CASE_TYPE_QUOTA_REQUEST, CASE_TYPE_INVESTIGATION_REQUEST, RPM_DISABLED_SENTINEL
+from quota_utils import get_usage_metrics, get_stored_thresholds, determine_support_case_scenario, determine_case_type_suffix, discover_sibling_profiles, get_combined_usage_metrics, CASE_TYPE_QUOTA_REQUEST, CASE_TYPE_INVESTIGATION_REQUEST, RPM_DISABLED_SENTINEL
 
 # Product name used in support case subject, email subject, body header, and duplicate detection
 PRODUCT_NAME = 'Bedrock Ops Alert'
@@ -106,12 +106,16 @@ def _check_alarm_dedup(case_id, triggered_eligible):
         True if alarm should be suppressed, False if should proceed with append.
     """
     alarm_to_check = triggered_eligible[0] if triggered_eligible else ''
+    logger.info(f"_check_alarm_dedup: case_id={case_id}, alarm_to_check='{alarm_to_check}', triggered_eligible={triggered_eligible}")
     if not alarm_to_check:
+        logger.info(f"_check_alarm_dedup: no alarm to check — proceeding (not suppressing)")
         return False
     is_dedup_alarm = 'Anomaly' in alarm_to_check or 'HighLatency' in alarm_to_check
+    logger.info(f"_check_alarm_dedup: is_dedup_alarm={is_dedup_alarm}")
     if is_dedup_alarm and has_alarm_already_appended(case_id, alarm_to_check):
         logger.info(f"Alarm {alarm_to_check} already communicated on case {case_id} — suppressing")
         return True
+    logger.info(f"_check_alarm_dedup: not suppressing")
     return False
 
 
@@ -151,15 +155,23 @@ def has_alarm_already_appended(case_id, alarm_pattern):
     """
     try:
         paginator = support_client.get_paginator('describe_communications')
+        comm_count = 0
+        logger.info(f"has_alarm_already_appended : case_id: {case_id}, alarm_pattern: {alarm_pattern}")
         for page in paginator.paginate(caseId=case_id):
             for comm in page.get('communications', []):
+                comm_count += 1
                 # Skip AWS Support engineer replies to avoid false matches from quoted content
                 if comm.get('submittedBy') == 'Amazon Web Services':
+                    logger.info(f"  has_alarm_already_appended: comm {comm_count} skipped (submittedBy=Amazon Web Services)")
                     continue
                 # Check if this alarm type was already communicated
                 if alarm_pattern in comm.get('body', ''):
+                    logger.info(f"  has_alarm_already_appended: comm {comm_count} MATCH FOUND (submittedBy={comm.get('submittedBy','')})")
                     logger.info(f"Alarm pattern '{alarm_pattern}' already found in case {case_id} — suppressing append")
                     return True
+                else:
+                    logger.info(f"  has_alarm_already_appended: comm {comm_count} no match (submittedBy={comm.get('submittedBy','')}, body_len={len(comm.get('body',''))})")
+        logger.info(f"has_alarm_already_appended: scanned {comm_count} comms, pattern NOT found — returning False")
         return False
     except Exception as e:
         logger.error(f"Failed to check case communications for dedup (failing open): {str(e)}")
@@ -336,7 +348,7 @@ def request_quota_increase_via_service_quotas(alarm_ctx, quota_requests, usage_m
             # Wait for AWS Support automation reply before appending our context.
             # Service Quotas cases get an auto-reply (~60s) asking for info. If we append
             # before that, our data doesn't register as a "reply" and case stays pending.
-            # Wait up to 2 min, then append anyway if automation doesn't fire.
+            # Wait up to 5 min, then append anyway if automation doesn't fire.
             _wait_for_support_automation_reply(case_id)
             
             case_body = build_msg_body(alarm_ctx, quota_requests, usage_metrics, scenario, thresholds)
@@ -371,7 +383,8 @@ def request_quota_increase_via_service_quotas(alarm_ctx, quota_requests, usage_m
                 time_created = details['time_created']
                 case_subject = details['subject'] if details['subject'] else "Quota Increase: Bedrock"
                 
-                # Dedup: check if this alarm type was already appended
+                # Dedup: check if this alarm type was already appended - first check for early exit if duplicate found
+                logger.info(f"_check_alarm_dedup first check for early exit if duplicate found")
                 if _check_alarm_dedup(case_id, triggered_eligible):
                     return {
                         'case_id': case_id, 'display_id': display_id,
@@ -380,6 +393,20 @@ def request_quota_increase_via_service_quotas(alarm_ctx, quota_requests, usage_m
                         'time_created': time_created, 'quotas': quota_requests
                     }
                 
+                # Wait for AWS Support automation reply before appending.
+                # The case was created by another stack moments ago — automation may not have replied yet.
+                _wait_for_support_automation_reply(case_id)
+                
+                # Dedup: check if this alarm type was already appended - second check for edge case(inflight corredpondence) if duplicate found
+                logger.info(f"_check_alarm_dedup second check for edge case(inflight corredpondence) if duplicate found")
+                if _check_alarm_dedup(case_id, triggered_eligible):
+                    return {
+                        'case_id': case_id, 'display_id': display_id,
+                        'subject': case_subject, 'case_type_suffix': case_type_suffix,
+                        'scenario': scenario, 'is_suppressed': True,
+                        'time_created': time_created, 'quotas': quota_requests
+                    }
+
                 # Append context to existing case
                 case_body = build_msg_body(alarm_ctx, quota_requests, usage_metrics, scenario, thresholds, is_append=True)
                 _append_to_case(case_id, case_body)
@@ -412,17 +439,18 @@ def _wait_for_support_automation_reply(case_id):
     
     Only called for first-time service quota case creation (not appends to existing cases).
     
-    Polls describe_communications every 5s, max 2 minutes.
-    If automation doesn't fire within 2 min, returns anyway (append proceeds regardless).
+    Polls describe_communications every 2s, max 5 minutes.
+    If automation doesn't fire within 5 min, returns anyway (append proceeds regardless).
     Throttle errors are handled defensively — polling continues on any exception.
     """
     import time
-    max_attempts = 150     # 150 × 2s = 300s (5 minutes)
+    max_attempts = int(os.environ.get('AUTOMATION_REPLY_MAX_ATTEMPTS', '150'))
     delay_seconds = 2
     
     logger.info(f"Waiting for AWS Support automation reply on case {case_id}...")
     
     for attempt in range(max_attempts):
+        # time.sleep required: AWS Support automation reply is async (~60s), no event/callback available
         time.sleep(delay_seconds)
         
         try:
@@ -437,8 +465,8 @@ def _wait_for_support_automation_reply(case_id):
             # 5s interval is generous; transient failures recover on next attempt.
             logger.warning(f"Failed to check communications on case {case_id} (attempt {attempt + 1}): {str(e)}")
     
-    # Timeout — automation didn't fire within 2 min. Append anyway.
-    logger.info(f"AWS Support automation did not reply within 2 min on case {case_id} — proceeding with append")
+    # Timeout — automation didn't fire within 5 min. Append anyway.
+    logger.info(f"AWS Support automation did not reply within 5 min on case {case_id} — proceeding with append")
 
 
 def _get_pending_quota_request_case_id(quota_code):
@@ -514,6 +542,7 @@ def _wait_for_quota_case_id(request_id):
     logger.info(f"Waiting for CaseId on quota request {request_id}...")
     
     while max_attempts > 0:
+        # time.sleep required: CaseId is populated asynchronously (~1-2s), no event/callback available
         time.sleep(delay_seconds)
         
         try:
@@ -550,6 +579,7 @@ def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, th
     try:
         alarm_name = alarm_ctx['alarm_name']
         model_id = alarm_ctx['model_id']
+        model_id_display = alarm_ctx.get('model_id_display', model_id)
         model_name = alarm_ctx['model_name']
         customer_name = alarm_ctx['customer_name']
         
@@ -663,13 +693,13 @@ def create_support_case(alarm_ctx, scenario, case_type_suffix, usage_metrics, th
         if (any(rpm_alarm in reason_text for rpm_alarm in rpm_alarms) or has_unknown_quota_issue) and requests_increase_percent > 0 and 'rpm' in model_quota_map:
             q = model_quota_map['rpm']
             new_val = int(q['value'] * (1 + requests_increase_percent / 100))
-            quota_requests.append({'code': q['code'], 'name': f"Model Inference requests per minute for {model_name} ({model_id})", 'percent': requests_increase_percent, 'current': q['value'], 'new': new_val})
+            quota_requests.append({'code': q['code'], 'name': f"Model Inference requests per minute for {model_name} ({model_id_display})", 'percent': requests_increase_percent, 'current': q['value'], 'new': new_val})
             logger.info(f"RPM: {q['value']} -> {new_val}")
         
         if (any(tpm_alarm in reason_text for tpm_alarm in tpm_alarms) or has_unknown_quota_issue) and tokens_increase_percent > 0 and 'tpm' in model_quota_map:
             q = model_quota_map['tpm']
             new_val = int(q['value'] * (1 + tokens_increase_percent / 100))
-            quota_requests.append({'code': q['code'], 'name': f"Model Inference tokens per minute for {model_name} ({model_id})", 'percent': tokens_increase_percent, 'current': q['value'], 'new': new_val})
+            quota_requests.append({'code': q['code'], 'name': f"Model Inference tokens per minute for {model_name} ({model_id_display})", 'percent': tokens_increase_percent, 'current': q['value'], 'new': new_val})
             logger.info(f"TPM: {q['value']} -> {new_val}")
         
         # Non-quota scenarios: create case for service-side investigation (no quota details)
@@ -775,6 +805,8 @@ def build_alarm_context(message):
     alarm_name = message.get('AlarmName', '')
     reason = message.get('NewStateReason', '')
     model_id = os.environ.get('BEDROCK_MODEL_ID', 'Not specified')
+    model_id_display = os.environ.get('BEDROCK_MODEL_ID_DISPLAY', model_id)
+    inference_profile_type = os.environ.get('INFERENCE_PROFILE_TYPE', 'System-Defined')
     model_name = os.environ.get('BEDROCK_MODEL_NAME', 'Not specified')
     input_modalities = os.environ.get('INPUT_MODALITIES', 'Not specified')
     geo_data_residency = os.environ.get('GEO_DATA_RESIDENCY_REQUIREMENT', 'NA')
@@ -860,6 +892,8 @@ def build_alarm_context(message):
     return {
         'alarm_name': alarm_name,
         'model_id': model_id,
+        'model_id_display': model_id_display,
+        'inference_profile_type': inference_profile_type,
         'model_name': model_name,
         'customer_name': customer_name,
         'input_modalities': input_modalities,
@@ -909,7 +943,9 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         body = f"Amazon {PRODUCT_NAME} - Automated Request\n\n"
     body += f"CUSTOMER: {alarm_ctx['customer_name']}\n"
     body += f"MODEL: {alarm_ctx['model_name']}\n"
-    body += f"MODEL ID: {alarm_ctx['model_id']}\n"
+    body += f"MODEL ID: {alarm_ctx['model_id_display']}\n"
+    if alarm_ctx.get('inference_profile_type') == 'Application':
+        body += f"APPLICATION INFERENCE PROFILE: {alarm_ctx['model_id']}\n"
     body += f"COMPOSITE ALARM: {alarm_ctx['alarm_name']}\n"
     body += f"CHILD ALARM TRIGGERED: {alarm_ctx['reason']}\n"
     body += f"TIMESTAMP: {alarm_ctx['timestamp']}\n"
@@ -989,7 +1025,7 @@ def build_msg_body(alarm_ctx, quota_requests=None, usage_metrics=None, scenario=
         body += f"  Peak RPM: {usage_metrics['peak_rpm']}\n"
         body += f"  Avg Input Tokens/Request: {usage_metrics['avg_input_tokens_per_request']}\n"
         body += f"  Avg Output Tokens/Request: {usage_metrics['avg_output_tokens_per_request']}\n"
-        body += f"  Input Modalities: {alarm_ctx.get('input_modalities', 'Not specified')}\n"
+        body += f"  Modalities (Input/Output): {alarm_ctx.get('input_modalities', 'Not specified')}\n"
         if not alarm_ctx.get('model_id', '').startswith('global.') and alarm_ctx.get('geo_data_residency', '').lower() == 'yes':
             body += f"  Cross Region Inference: Due to Geographic data residency requirement, Global Cross Region Inference can't be considered.\n"
         body += "\n"
@@ -1145,10 +1181,18 @@ def handle_alarm_and_case(event, context):
     # These are always available for the email regardless of case outcome.
     triggered = alarm_ctx.get('triggered_alarms_str', '') if alarm_ctx else ''
     model_id = alarm_ctx.get('model_id', '') if alarm_ctx else os.environ.get('BEDROCK_MODEL_ID', '')
+    inference_profile_type = alarm_ctx.get('inference_profile_type', 'System-Defined') if alarm_ctx else os.environ.get('INFERENCE_PROFILE_TYPE', 'System-Defined')
     customer_name = alarm_ctx.get('customer_name', '') if alarm_ctx else get_secret(os.environ.get('CUSTOMER_NAME_SECRET', ''))
     model_name = os.environ.get('BEDROCK_MODEL_NAME', '')
     
-    usage_metrics = get_usage_metrics(model_id) if model_id else None
+    # For Application profiles: use combined metrics across all sibling profiles for accurate scenario
+    # For System-Defined: use single model_id metrics (existing behavior)
+    if inference_profile_type == 'Application' and model_id:
+        sibling_ids = discover_sibling_profiles(model_id)
+        usage_metrics = get_combined_usage_metrics(sibling_ids) if sibling_ids else get_usage_metrics(model_id)
+    else:
+        usage_metrics = get_usage_metrics(model_id) if model_id else None
+    
     thresholds = get_stored_thresholds(customer_name, model_name) if customer_name and model_name else None
     scenario = determine_support_case_scenario(usage_metrics, thresholds, triggered) if triggered else None
     case_type_suffix = determine_case_type_suffix(triggered)

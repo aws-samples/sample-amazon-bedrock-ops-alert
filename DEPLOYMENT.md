@@ -1,6 +1,8 @@
 # Amazon Bedrock Ops Alert: Deployment Guide
 
-This guide walks you through deploying Amazon Bedrock Ops Alert in your own environment, including prerequisites, packaging, stack deployment, testing, and cleanup.
+This guide walks you through deploying Amazon Bedrock Ops Alert using AWS CloudFormation, including prerequisites, packaging, stack deployment, testing, and cleanup.
+
+For Terraform deployment instructions, see [TF-DEPLOYMENT.md](TF-DEPLOYMENT.md).
 
 ## Prerequisites
 
@@ -11,6 +13,7 @@ Before deploying the solution, confirm you have the following:
 - Active Amazon Bedrock usage with established quotas for your target model
 - AWS Business or Enterprise Support plan (required for automated support case creation through the Support API)
 - AWS Identity and Access Management (IAM) permissions to create AWS CloudFormation stacks and associated resources
+- Service Quotas service-linked role (required for the deterministic quota increase path). If your account has never requested a quota increase, create it with: `aws iam create-service-linked-role --aws-service-name servicequotas.amazonaws.com`. Without this role, the solution falls back to creating support cases directly — functionality is not impacted.
 
 **Required information:**
 
@@ -50,12 +53,18 @@ aws s3api put-bucket-versioning --bucket $BUCKET_NAME --versioning-configuration
 
 ## Step 3: Package the Lambda function and layer
 
-The solution uses two Lambda deployment packages. The Lambda layer contains shared quota calculation utilities used by multiple functions, eliminating code duplication and maintaining consistent behavior.
+The solution uses Lambda deployment packages for all functions. The Lambda layer contains shared quota calculation utilities used by multiple functions, eliminating code duplication and maintaining consistent behavior.
 
 ```bash
 # Package the notification processor Lambda
 cd code/lambda
 zip notification_processor.zip notification_processor.py
+
+# Package the quota calculator Lambda
+zip quota_calculator.zip quota_calculator.py
+
+# Package the alarm updater Lambda
+zip alarm_updater.zip alarm_updater.py
 
 # Package the quota utils Lambda layer
 cd ../quota_utils_layer
@@ -69,6 +78,8 @@ cd ../..
 
 ```bash
 aws s3 cp code/lambda/notification_processor.zip s3://$BUCKET_NAME/
+aws s3 cp code/lambda/quota_calculator.zip s3://$BUCKET_NAME/
+aws s3 cp code/lambda/alarm_updater.zip s3://$BUCKET_NAME/
 aws s3 cp code/quota_utils_layer.zip s3://$BUCKET_NAME/
 ```
 
@@ -78,7 +89,7 @@ Upload the template to S3 and deploy using a presigned URL.
 
 Before running the deploy command, replace the following placeholder values with your own:
 
-- `YourCompany`: Your customer identifier (max 10 characters). This value appears in resource names, alarm prefixes, Parameter Store paths, and Lambda function names.
+- `AcmeCorp`: Your customer identifier (max 10 characters). This value appears in resource names, alarm prefixes, Parameter Store paths, and Lambda function names.
 - `email1@example.com`, `email2@example.com` : Your stakeholder email addresses
 
 If you are monitoring a model other than the example (Claude Opus 4.6), also update the following parameters in the deploy command:
@@ -91,7 +102,7 @@ If you are monitoring a model other than the example (Claude Opus 4.6), also upd
 - `RequestsPerMinuteQuotaCode` : Your model-specific RPM quota code from the [Service Quotas console](https://console.aws.amazon.com/servicequotas/home/services/bedrock/quotas)
 - `TokensPerMinuteQuotaCode`: Your model-specific TPM quota code from the [Service Quotas console](https://console.aws.amazon.com/servicequotas/home/services/bedrock/quotas)
 
-For example, if you set `CustomerName` to `Acme` and `BedrockModelName` to `G-Opus-4-6`, your alarm names follow the pattern `Acme-Bedrock-*-G-Opus-4-6`, your Parameter Store paths follow `/Acme/bedrock/quota-monitoring/G-Opus-4-6/`, and your Lambda function names follow `Acme-Bedrock-Notification-Processor-G-Opus-4-6`.
+For example, if you set `CustomerName` to `AcmeCorp` and `BedrockModelName` to `G-Opus-4-6`, your alarm names follow the pattern `AcmeCorp-Bedrock-*-G-Opus-4-6`, your Parameter Store paths follow `/AcmeCorp/bedrock/quota-monitoring/G-Opus-4-6/`, and your Lambda function names follow `AcmeCorp-Bedrock-Notification-Processor-G-Opus-4-6`.
 
 **Note:** The default values for the following parameters have been validated in production environments and are recommended for most deployments: SupportCaseLookbackDays, TokensPerMinuteIncreasePercent, RequestsPerMinuteIncreasePercent, ErrorThreshold, CriticalAlarmEvaluationPeriods, RequestsPerMinuteThresholdPercent, TokensPerMinuteThresholdPercent, LatencyThresholdMs, WarningAlarmEvaluationPeriods, LatencyAlarmPeriod, LatencyAlarmEvaluationPeriods, AnomalyDetectionPeriod, AnomalyEvaluationPeriods, AnomalySensitivity, AlarmEvaluationPeriod, and ThresholdUpdateScheduleIntervalDays. You can adjust these values to match your specific workload characteristics, but the defaults provide a balanced configuration that minimizes false positives while detecting genuine operational issues.
 
@@ -108,11 +119,11 @@ aws cloudformation create-stack \
   --template-url "$TEMPLATE_URL" \
   --parameters \
  ParameterKey=LambdaS3Bucket,ParameterValue=$BUCKET_NAME \
- ParameterKey=LambdaS3Key,ParameterValue=notification_processor.zip \
- ParameterKey=CustomerName,ParameterValue=YourCompany \
+ ParameterKey=CustomerName,ParameterValue=AcmeCorp \
  'ParameterKey=StakeholderEmailList,ParameterValue=email1@example.com\,email2@example.com' \
  ParameterKey=NotificationPreference,ParameterValue=all \
  ParameterKey=BedrockModelName,ParameterValue=G-Opus-4-6 \
+ ParameterKey=InferenceProfileType,ParameterValue=System-Defined \
  ParameterKey=BedrockModelId,ParameterValue=global.anthropic.claude-opus-4-6-v1 \
  ParameterKey=GeoDataResidencyRequirement,ParameterValue=No \
  'ParameterKey=InputModalities,ParameterValue=TEXT and IMAGE' \
@@ -155,15 +166,15 @@ The following tables describe all CloudFormation parameters organized by configu
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| LambdaS3Bucket | | S3 bucket name containing the Lambda deployment package |
-| LambdaS3Key | notification_processor.zip | S3 key (path) to the Lambda deployment package zip file |
+| LambdaS3Bucket | | S3 bucket name containing the Lambda deployment packages |
 
 **Model Specification**
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | BedrockModelName | G-Opus-4-6 | Short model name for resource naming (max 15 characters) |
-| BedrockModelId | global.anthropic.claude-opus-4-6-v1 | Bedrock model identifier being monitored |
+| InferenceProfileType | System-Defined | Inference profile type: System-Defined (direct model/cross-region profile) or Application (customer-created profile for cost tracking) |
+| BedrockModelId | global.anthropic.claude-opus-4-6-v1 | For System-Defined: model ID. For Application: short profile ID (e.g., e5t98lwp1dsr) |
 | GeoDataResidencyRequirement | No | Geographic data residency requirement (Yes/No/NA). If Yes, Global Cross Region Inference cannot be considered |
 | InputModalities | TEXT and IMAGE | Input modalities used by the model (TEXT and IMAGE, TEXT Only, IMAGE Only) |
 
@@ -274,7 +285,7 @@ To validate the notification workflow, trigger a test alarm:
 
 ```bash
 aws cloudwatch set-alarm-state \
-  --alarm-name YourCompany-Bedrock-HighInvocationRate-Warning-G-Opus-4-6 \
+  --alarm-name AcmeCorp-Bedrock-HighInvocationRate-Warning-G-Opus-4-6 \
   --state-value ALARM \
   --state-reason "Testing notification workflow"
 ```
@@ -310,19 +321,20 @@ aws s3 rm s3://$BUCKET_NAME --recursive
 aws s3 rb s3://$BUCKET_NAME
 ```
 
-4. Delete the Parameter Store threshold parameters. In the following cleanup commands, replace `YourCompany` and `G-Opus-4-6` with the `CustomerName` and `BedrockModelName` values used during deployment:
+4. Delete the Parameter Store threshold parameters. In the following cleanup commands, replace `AcmeCorp` and `G-Opus-4-6` with the `CustomerName` and `BedrockModelName` values used during deployment:
 
 ```bash
 # Delete threshold parameters (not managed by CloudFormation)
 aws ssm delete-parameters --names \
-  "/YourCompany/bedrock/quota-monitoring/G-Opus-4-6/thresholds/rpm-threshold-calculated" \
-  "/YourCompany/bedrock/quota-monitoring/G-Opus-4-6/thresholds/tpm-threshold-calculated" \
-  "/YourCompany/bedrock/quota-monitoring/G-Opus-4-6/thresholds/last-updated"
+  "/AcmeCorp/bedrock/quota-monitoring/G-Opus-4-6/thresholds/rpm-threshold-calculated" \
+  "/AcmeCorp/bedrock/quota-monitoring/G-Opus-4-6/thresholds/tpm-threshold-calculated" \
+  "/AcmeCorp/bedrock/quota-monitoring/G-Opus-4-6/thresholds/last-updated" \
+  "/AcmeCorp/bedrock/quota-monitoring/G-Opus-4-6/resolved-model-id-display"
 ```
 
 5. (Optional) Delete the CloudWatch log groups:
 
 ```bash
 # Delete CloudWatch log groups (optional)
-aws logs delete-log-group --log-group-name /aws/lambda/YourCompany-Bedrock-Notification-Processor-G-Opus-4-6
+aws logs delete-log-group --log-group-name /aws/lambda/AcmeCorp-Bedrock-Notification-Processor-G-Opus-4-6
 ```

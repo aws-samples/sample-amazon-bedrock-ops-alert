@@ -16,11 +16,11 @@ Metadata:
           default: "Lambda Deployment Configuration"
         Parameters:
           - LambdaS3Bucket
-          - LambdaS3Key
       - Label:
           default: "Model Specification"
         Parameters:
           - BedrockModelName
+          - InferenceProfileType
           - BedrockModelId
           - GeoDataResidencyRequirement
           - InputModalities
@@ -78,16 +78,16 @@ Metadata:
         default: "Notification Preference"
       BedrockModelName:
         default: "Bedrock Model Name"
+      InferenceProfileType:
+        default: "Inference Profile Type"
       BedrockModelId:
-        default: "Bedrock Model ID"
+        default: "Bedrock Model/Inference Profile ID"
       GeoDataResidencyRequirement:
         default: "Geographic Data Residency Requirement"
       InputModalities:
         default: "Input Modalities"
       LambdaS3Bucket:
         default: "Lambda S3 Bucket"
-      LambdaS3Key:
-        default: "Lambda S3 Key"
       EnableAutomatedSupportCase:
         default: "Enable Automated Support Case"
       SupportCaseLookbackDays:
@@ -154,10 +154,15 @@ Parameters:
     MinLength: 1
     MaxLength: 15
     AllowedPattern: "^[a-zA-Z0-9-]+$"
+  InferenceProfileType:
+    Type: String
+    Default: "System-Defined"
+    AllowedValues: ["System-Defined", "Application"]
+    Description: "Inference profile type. System-Defined = direct model ID or AWS-managed cross-region profile. Application = customer-created inference profile for cost tracking. Find profiles: https://console.aws.amazon.com/bedrock/home?/inference-profiles#/inference-profiles"
   BedrockModelId:
     Type: String
     Default: "global.anthropic.claude-opus-4-6-v1"
-    Description: Bedrock model identifier, i.e. the specific model being monitored for your applications (e.g., Claude, Titan, Jurassic)
+    Description: "Bedrock model/inference profile identifier. For System-Defined: use the model ID (e.g., global.anthropic.claude-opus-4-6-v1). For Application: use the short profile ID (e.g., e5t98lwp1dsr). Find profiles: https://console.aws.amazon.com/bedrock/home?/inference-profiles#/inference-profiles"
   GeoDataResidencyRequirement:
     Type: String
     Default: "No"
@@ -172,14 +177,9 @@ Parameters:
   # Lambda Deployment Configuration
   LambdaS3Bucket:
     Type: String
-    Description: S3 bucket name containing the Lambda deployment package (notification_processor.zip)
+    Description: S3 bucket name containing the Lambda deployment packages (notification_processor.zip, quota_calculator.zip, alarm_updater.zip, quota_utils_layer.zip)
     MinLength: 3
     MaxLength: 63
-  LambdaS3Key:
-    Type: String
-    Default: "notification_processor.zip"
-    Description: S3 key (path) to the Lambda deployment package zip file
-    MinLength: 1
 
   # Automated Support Case Configuration
   EnableAutomatedSupportCase:
@@ -368,6 +368,14 @@ Resources:
       Value: !Ref NotificationPreference
       Description: "Email notification preference: all (Critical and Warning), critical (Critical Only), warning (Warning Only)"
 
+  InferenceProfileTypeParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/inference-profile-type"
+      Type: String
+      Value: !Ref InferenceProfileType
+      Description: "Inference profile type: System-Defined or Application"
+
   # Parameter Store for support case automation configuration
   EnableAutomatedSupportCaseParameter:
     Type: AWS::SSM::Parameter
@@ -455,7 +463,7 @@ Resources:
     Properties:
       FunctionName: !Sub "${CustomerName}-Quota-Calculator-${BedrockModelName}"
       Runtime: python3.14
-      Handler: index.handler
+      Handler: quota_calculator.handler
       Role: !GetAtt QuotaCalculatorRole.Arn
       Timeout: 300
       Architectures:
@@ -463,67 +471,8 @@ Resources:
       Layers:
         - !Ref QuotaUtilsLayer
       Code:
-        ZipFile: |
-          import json
-          import urllib3
-          from quota_utils import validate_quota_codes, calculate_thresholds, store_in_parameter_store
-          
-          http = urllib3.PoolManager()
-          
-          def send_response(event, context, status, reason=None, physical_id=None, data=None):
-              response_body = {
-                  'Status': status,
-                  'Reason': reason or 'See CloudWatch Log Stream: ' + context.log_stream_name,
-                  'PhysicalResourceId': physical_id or context.log_stream_name,
-                  'StackId': event['StackId'],
-                  'RequestId': event['RequestId'],
-                  'LogicalResourceId': event['LogicalResourceId'],
-                  'Data': data or {}
-              }
-              json_response = json.dumps(response_body).encode('utf-8')
-              try:
-                  http.request('PUT', event['ResponseURL'], body=json_response, headers={'Content-Type': ''})
-                  print('Response sent successfully: ' + status)
-              except Exception as e:
-                  print('Failed to send response: ' + str(e))
-          
-          def handler(event, context):
-              print('Event: ' + json.dumps(event))
-              try:
-                  request_type = event['RequestType']
-                  if request_type in ['Create', 'Update']:
-                      props = event['ResourceProperties']
-                      rpm_quota_code = props['RequestsPerMinuteQuotaCode']
-                      tpm_quota_code = props['TokensPerMinuteQuotaCode']
-                      rpm_percent = float(props['RequestsPerMinuteThresholdPercent'])
-                      tpm_percent = float(props['TokensPerMinuteThresholdPercent'])
-                      customer_name = props['CustomerName']
-                      model_name = props['BedrockModelName']
-                      model_id = props['BedrockModelId']
-                      print('Validating quota codes for model: ' + model_id)
-                      validate_quota_codes(rpm_quota_code, tpm_quota_code, model_id)
-                      print('Quota code validation passed')
-                      print('Calculating thresholds: RPM=' + str(rpm_percent) + '%, TPM=' + str(tpm_percent) + '%')
-                      thresholds = calculate_thresholds(rpm_quota_code, tpm_quota_code, rpm_percent, tpm_percent)
-                      print('Calculated thresholds: ' + json.dumps(thresholds))
-                      # Convert keys to match CloudFormation output format
-                      cf_thresholds = {
-                          'RpmThreshold': thresholds['rpm_threshold'],
-                          'TpmThreshold': thresholds['tpm_threshold']
-                      }
-                      store_in_parameter_store(customer_name, model_name, thresholds)
-                      send_response(event, context, 'SUCCESS', reason='Thresholds calculated successfully', physical_id=customer_name + '-' + model_name + '-thresholds', data=cf_thresholds)
-                  elif request_type == 'Delete':
-                      print('Delete request - no action needed')
-                      send_response(event, context, 'SUCCESS', reason='Delete completed', physical_id=event.get('PhysicalResourceId', context.log_stream_name))
-              except ValueError as ve:
-                  print('Validation Error: ' + str(ve))
-                  send_response(event, context, 'FAILED', reason='Quota code validation failed: ' + str(ve), physical_id=context.log_stream_name)
-              except Exception as e:
-                  print('Error: ' + str(e))
-                  import traceback
-                  traceback.print_exc()
-                  send_response(event, context, 'FAILED', reason=str(e), physical_id=context.log_stream_name)
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: quota_calculator.zip
 
   QuotaCalculatorRole:
     Type: AWS::IAM::Role
@@ -562,6 +511,17 @@ Resources:
                   - ssm:PutParameter
                 Resource:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/thresholds/*"
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/resolved-model-id-display"
+        - PolicyName: BedrockInferenceProfilePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:GetInferenceProfile
+                  - bedrock:ListInferenceProfiles
+                # ListInferenceProfiles does not support resource-level permissions
+                Resource: "*"
 
   QuotaCalculatorCustomResource:
     Type: AWS::CloudFormation::CustomResource
@@ -576,6 +536,7 @@ Resources:
       CustomerName: !Ref CustomerName
       BedrockModelName: !Ref BedrockModelName
       BedrockModelId: !Ref BedrockModelId
+      InferenceProfileType: !Ref InferenceProfileType
 
   # Lambda for updating alarms when quotas change
   AlarmUpdater:
@@ -583,7 +544,7 @@ Resources:
     Properties:
       FunctionName: !Sub "${CustomerName}-Alarm-Updater-${BedrockModelName}"
       Runtime: python3.14
-      Handler: index.handler
+      Handler: alarm_updater.handler
       Role: !GetAtt AlarmUpdaterRole.Arn
       Timeout: 300
       Architectures:
@@ -598,63 +559,11 @@ Resources:
           TPM_QUOTA_CODE: !Ref TokensPerMinuteQuotaCode
           RPM_THRESHOLD_PERCENT: !Ref RequestsPerMinuteThresholdPercent
           TPM_THRESHOLD_PERCENT: !Ref TokensPerMinuteThresholdPercent
+          INFERENCE_PROFILE_TYPE: !Ref InferenceProfileType
+          BEDROCK_MODEL_ID: !Ref BedrockModelId
       Code:
-        ZipFile: |
-          import boto3
-          import json
-          import os
-          from quota_utils import calculate_thresholds, store_in_parameter_store
-          
-          def update_alarms(customer_name, model_name, thresholds):
-              cloudwatch = boto3.client('cloudwatch')
-              alarm_updates = [
-                  {'name': customer_name + '-Bedrock-HighInvocationRate-Warning-' + model_name, 'threshold': thresholds['rpm_threshold']},
-                  {'name': customer_name + '-Bedrock-HighTPMQuotaUsage-Warning-' + model_name, 'threshold': thresholds['tpm_threshold']}
-              ]
-              for alarm in alarm_updates:
-                  try:
-                      response = cloudwatch.describe_alarms(AlarmNames=[alarm['name']])
-                      if not response['MetricAlarms']:
-                          print('Alarm not found: ' + alarm['name'])
-                          continue
-                      existing_alarm = response['MetricAlarms'][0]
-                      cloudwatch.put_metric_alarm(
-                          AlarmName=alarm['name'],
-                          AlarmDescription=existing_alarm['AlarmDescription'],
-                          MetricName=existing_alarm['MetricName'],
-                          Namespace=existing_alarm['Namespace'],
-                          Statistic=existing_alarm['Statistic'],
-                          Period=existing_alarm['Period'],
-                          EvaluationPeriods=existing_alarm['EvaluationPeriods'],
-                          Threshold=alarm['threshold'],
-                          ComparisonOperator=existing_alarm['ComparisonOperator'],
-                          Dimensions=existing_alarm['Dimensions'],
-                          TreatMissingData=existing_alarm.get('TreatMissingData', 'notBreaching')
-                      )
-                      print('Updated alarm: ' + alarm['name'] + ' with threshold: ' + str(alarm['threshold']))
-                  except Exception as e:
-                      print('Failed to update alarm ' + alarm['name'] + ': ' + str(e))
-          
-          def handler(event, context):
-              print('Event: ' + json.dumps(event))
-              try:
-                  customer_name = os.environ['CUSTOMER_NAME']
-                  model_name = os.environ['BEDROCK_MODEL_NAME']
-                  rpm_quota_code = os.environ['RPM_QUOTA_CODE']
-                  tpm_quota_code = os.environ['TPM_QUOTA_CODE']
-                  rpm_percent = float(os.environ['RPM_THRESHOLD_PERCENT'])
-                  tpm_percent = float(os.environ['TPM_THRESHOLD_PERCENT'])
-                  print('Recalculating thresholds for ' + customer_name + '/' + model_name)
-                  thresholds = calculate_thresholds(rpm_quota_code, tpm_quota_code, rpm_percent, tpm_percent)
-                  print('New thresholds: ' + json.dumps(thresholds))
-                  update_alarms(customer_name, model_name, thresholds)
-                  store_in_parameter_store(customer_name, model_name, thresholds)
-                  return {'statusCode': 200, 'body': json.dumps({'message': 'Alarms updated successfully', 'thresholds': thresholds})}
-              except Exception as e:
-                  print('Error: ' + str(e))
-                  import traceback
-                  traceback.print_exc()
-                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+        S3Bucket: !Ref LambdaS3Bucket
+        S3Key: alarm_updater.zip
 
   AlarmUpdaterRole:
     Type: AWS::IAM::Role
@@ -703,6 +612,16 @@ Resources:
                   - ssm:GetParameter
                 Resource:
                   - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${CustomerName}/bedrock/quota-monitoring/${BedrockModelName}/thresholds/*"
+        - PolicyName: BedrockInferenceProfilePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:GetInferenceProfile
+                  - bedrock:ListInferenceProfiles
+                # ListInferenceProfiles does not support resource-level permissions
+                Resource: "*"
 
   # EventBridge rule for automated threshold updates (conditional)
   ThresholdUpdateSchedule:
@@ -887,6 +806,8 @@ Resources:
         Variables:
           CUSTOMER_NAME_SECRET: !Ref CustomerNameSecret
           BEDROCK_MODEL_ID: !Ref BedrockModelId
+          BEDROCK_MODEL_ID_DISPLAY: !GetAtt QuotaCalculatorCustomResource.ResolvedModelIdDisplay
+          INFERENCE_PROFILE_TYPE: !Ref InferenceProfileType
           BEDROCK_MODEL_NAME: !Ref BedrockModelName
           GEO_DATA_RESIDENCY_REQUIREMENT: !Ref GeoDataResidencyRequirement
           INPUT_MODALITIES: !Ref InputModalities
@@ -898,6 +819,7 @@ Resources:
           TOKENS_PER_MINUTE_INCREASE_PERCENT_PARAM: !Ref TokensPerMinuteIncreasePercentParameter
           REQUESTS_PER_MINUTE_INCREASE_PERCENT_PARAM: !Ref RequestsPerMinuteIncreasePercentParameter
           SUPPORT_CASE_LOOKBACK_DAYS: !Ref SupportCaseLookbackDays
+          AUTOMATION_REPLY_MAX_ATTEMPTS: 120
           REQUESTS_PER_MINUTE_QUOTA_CODE: !Ref RequestsPerMinuteQuotaCode
           TOKENS_PER_MINUTE_QUOTA_CODE: !Ref TokensPerMinuteQuotaCode
           # Alarm pattern configurations (comma-separated)
@@ -906,7 +828,7 @@ Resources:
           TPM_ALARM_PATTERNS: "HighTPMQuotaUsage,InputTokenAnomaly,OutputTokenAnomaly"
       Code:
         S3Bucket: !Ref LambdaS3Bucket
-        S3Key: !Ref LambdaS3Key
+        S3Key: notification_processor.zip
 
   NotificationProcessorRole:
     Type: AWS::IAM::Role
@@ -1019,9 +941,20 @@ Resources:
                 Action:
                   - cloudwatch:DescribeAlarms
                   - cloudwatch:GetMetricStatistics
-                # Note: These CloudWatch read-only actions do not support resource-level permissions
-                # AWS requires Resource: "*" for these actions
+                  - cloudwatch:GetMetricData
+                # Note: DescribeAlarms requires Resource: "*" to retrieve composite alarm state
+                # (poll_until_composite_ok). GetMetricStatistics/GetMetricData do not support resource-level permissions.
                 # Reference: https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarms.html
+                Resource: "*"
+        - PolicyName: BedrockInferenceProfilePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:GetInferenceProfile
+                  - bedrock:ListInferenceProfiles
+                # ListInferenceProfiles does not support resource-level permissions
                 Resource: "*"
 
   # Lambda subscription to raw alarm topic
@@ -1094,42 +1027,61 @@ Resources:
       TreatMissingData: notBreaching
 
   # Layer 2: Usage Rate Monitoring
+  # Always use metric math format (Expression: "m1") — works for both System-Defined and Application.
+  # AlarmUpdater adds sibling profiles (m1+m2+m3...) for Application type on scheduled runs.
   HighInvocationRateAlarm:
     Type: AWS::CloudWatch::Alarm
     DependsOn: QuotaCalculatorCustomResource
     Properties:
       AlarmName: !Sub "${CustomerName}-Bedrock-HighInvocationRate-Warning-${BedrockModelName}"
       AlarmDescription: "Bedrock model request rate approaching limits"
-      MetricName: Invocations
-      Namespace: AWS/Bedrock
-      Statistic: Sum
-      Period: !Ref AlarmEvaluationPeriod
       EvaluationPeriods: !Ref WarningAlarmEvaluationPeriods
-      Threshold: !GetAtt QuotaCalculatorCustomResource.RpmThreshold
       ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: ModelId
-          Value: !Ref BedrockModelId
+      Threshold: !GetAtt QuotaCalculatorCustomResource.RpmThreshold
       TreatMissingData: notBreaching
+      Metrics:
+        - Id: m1
+          MetricStat:
+            Metric:
+              MetricName: Invocations
+              Namespace: AWS/Bedrock
+              Dimensions:
+                - Name: ModelId
+                  Value: !GetAtt QuotaCalculatorCustomResource.MetricDimensionValue
+            Period: !Ref AlarmEvaluationPeriod
+            Stat: Sum
+          ReturnData: false
+        - Id: total
+          Expression: "m1"
+          Label: "CombinedRPM"
+          ReturnData: true
 
-  # EstimatedTPMQuotaUsage: Combined TPM quota consumption metric (includes cache write tokens and output burndown multipliers)
   HighTPMQuotaUsageAlarm:
     Type: AWS::CloudWatch::Alarm
     DependsOn: QuotaCalculatorCustomResource
     Properties:
       AlarmName: !Sub "${CustomerName}-Bedrock-HighTPMQuotaUsage-Warning-${BedrockModelName}"
       AlarmDescription: "Bedrock model estimated TPM quota consumption approaching limits"
-      MetricName: EstimatedTPMQuotaUsage
-      Namespace: AWS/Bedrock
-      Statistic: Sum
-      Period: !Ref AlarmEvaluationPeriod
       EvaluationPeriods: !Ref WarningAlarmEvaluationPeriods
-      Threshold: !GetAtt QuotaCalculatorCustomResource.TpmThreshold
       ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: ModelId
-          Value: !Ref BedrockModelId
+      Threshold: !GetAtt QuotaCalculatorCustomResource.TpmThreshold
       TreatMissingData: notBreaching
+      Metrics:
+        - Id: m1
+          MetricStat:
+            Metric:
+              MetricName: EstimatedTPMQuotaUsage
+              Namespace: AWS/Bedrock
+              Dimensions:
+                - Name: ModelId
+                  Value: !GetAtt QuotaCalculatorCustomResource.MetricDimensionValue
+            Period: !Ref AlarmEvaluationPeriod
+            Stat: Sum
+          ReturnData: false
+        - Id: total
+          Expression: "m1"
+          Label: "CombinedTPM"
+          ReturnData: true
 
   HighLatencyAlarm:
     Type: AWS::CloudWatch::Alarm
