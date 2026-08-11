@@ -292,8 +292,8 @@ variable "latency_alarm_evaluation_periods" {
 
 variable "anomaly_detection_period" {
   type        = number
-  default     = 300
-  description = "Anomaly check period in seconds (300 = 5 min)"
+  default     = 900
+  description = "Anomaly check period in seconds (900 = 15 min)"
 
   validation {
     condition     = contains([60, 300, 900, 3600], var.anomaly_detection_period)

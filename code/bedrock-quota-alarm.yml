@@ -265,14 +265,14 @@ Parameters:
   # Layer 3: Anomaly Detection Parameters
   AnomalyDetectionPeriod:
     Type: Number
-    Default: 300
+    Default: 900
     AllowedValues: [60, 300, 900, 3600]
-    Description: "Anomaly check period in seconds (300 = 5 min)"
+    Description: "Anomaly check period in seconds (900 = 15 min)"
   AnomalyEvaluationPeriods:
     Type: Number
     Default: 12
     MinValue: 1
-    Description: "Consecutive anomaly periods before alert. Default: 12. Example: 60 minutes of sustained anomaly (12 X 300s) will trigger the alarm (Min: 1)"
+    Description: "Consecutive anomaly periods before alert. Default: 12. Example: 3 hours of sustained anomaly (12 x 900s) will trigger the alarm (Min: 1)"
   AnomalySensitivity:
     Type: Number
     Default: 9

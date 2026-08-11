@@ -142,7 +142,7 @@ aws cloudformation create-stack \
  ParameterKey=WarningAlarmEvaluationPeriods,ParameterValue=5 \
  ParameterKey=LatencyAlarmPeriod,ParameterValue=300 \
  ParameterKey=LatencyAlarmEvaluationPeriods,ParameterValue=2 \
- ParameterKey=AnomalyDetectionPeriod,ParameterValue=300 \
+ ParameterKey=AnomalyDetectionPeriod,ParameterValue=900 \
  ParameterKey=AnomalyEvaluationPeriods,ParameterValue=12 \
  ParameterKey=AnomalySensitivity,ParameterValue=9 \
  ParameterKey=AlarmEvaluationPeriod,ParameterValue=60 \
@@ -229,8 +229,8 @@ The following tables describe all CloudFormation parameters organized by configu
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| AnomalyDetectionPeriod | 300 | Anomaly check period in seconds (300 = 5 min) |
-| AnomalyEvaluationPeriods | 12 | Consecutive anomaly periods before alert (Min: 1). Default: 12. Example: 60 minutes of sustained anomaly (12 × 300s) will trigger the alarm |
+| AnomalyDetectionPeriod | 900 | Anomaly check period in seconds (900 = 15 min) |
+| AnomalyEvaluationPeriods | 12 | Consecutive anomaly periods before alert (Min: 1). Default: 12. Example: 3 hours of sustained anomaly (12 × 900s) will trigger the alarm |
 | AnomalySensitivity | 9 | Anomaly sensitivity. 1 = most sensitive, 10 = least sensitive |
 
 **Common Alarm Configuration**

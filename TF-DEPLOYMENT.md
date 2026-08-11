@@ -245,8 +245,8 @@ The following tables describe all Terraform variables organized by configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| anomaly_detection_period | 300 | Anomaly check period in seconds (300 = 5 min) |
-| anomaly_evaluation_periods | 12 | Consecutive anomaly periods before alert (Min: 1). Default: 12. Example: 60 minutes of sustained anomaly (12 × 300s) will trigger the alarm |
+| anomaly_detection_period | 900 | Anomaly check period in seconds (900 = 15 min) |
+| anomaly_evaluation_periods | 12 | Consecutive anomaly periods before alert (Min: 1). Default: 12. Example: 3 hours of sustained anomaly (12 × 900s) will trigger the alarm |
 | anomaly_sensitivity | 9 | Anomaly sensitivity. 1 = most sensitive, 10 = least sensitive |
 
 **Common Alarm Configuration**
