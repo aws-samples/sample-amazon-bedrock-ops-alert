@@ -1217,10 +1217,10 @@ def handle_alarm_and_case(event, context):
         logger.error(f"Support case workflow error: {str(e)}")
     finally:
         # Email always sends — scenario is always available from above
-        result = send_email_notification(event, context, alarm_ctx, case_result, case_type_suffix, scenario)
+        result = send_email_notification(event, context, alarm_ctx, case_result, case_type_suffix, scenario, usage_metrics, thresholds)
     return result
 
-def send_email_notification(event, context, alarm_ctx=None, case_result=None, case_type_suffix=CASE_TYPE_QUOTA_REQUEST, scenario=None):
+def send_email_notification(event, context, alarm_ctx=None, case_result=None, case_type_suffix=CASE_TYPE_QUOTA_REQUEST, scenario=None, usage_metrics=None, thresholds=None):
     """
     Send formatted email notification to stakeholders via SNS.
     Applies notification preference filter (all/critical/warning),
@@ -1251,7 +1251,8 @@ def send_email_notification(event, context, alarm_ctx=None, case_result=None, ca
             email_ctx['exec_summary'] = ctx['exec_summary'].replace('Our Bedrock AI model', 'Your Bedrock AI model')
             is_appended = case_result.get('is_append', False) if case_result else False
             is_suppressed = case_result.get('is_suppressed', False) if case_result else False
-            core_body = build_msg_body(email_ctx, case_result=case_result, scenario=scenario, audience='ops_team', is_append=is_appended, is_suppressed=is_suppressed)
+            quota_requests = case_result.get('quotas') if case_result else None
+            core_body = build_msg_body(alarm_ctx=email_ctx, quota_requests=quota_requests, usage_metrics=usage_metrics, scenario=scenario, thresholds=thresholds, case_result=case_result, audience='ops_team', is_append=is_appended, is_suppressed=is_suppressed)
 
             enhanced_message = f"SEVERITY: {ctx['severity']} - IMMEDIATE ACTION REQUIRED\n\n"
             enhanced_message += core_body + "\n"
