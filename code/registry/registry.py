@@ -15,7 +15,7 @@ registry_core.py; this file adds only the CloudFormation create, delete, and sta
     python registry.py apply    # create / delete per row Status
 
 Table key:
-    AccountId        (HASH)   578707974125
+    AccountId        (HASH)   111122223333
     DeploymentTarget (RANGE)  <Region>#<CustomerName>#<BedrockModelName>
 
 Region, CustomerName and BedrockModelName are parsed from DeploymentTarget and passed to

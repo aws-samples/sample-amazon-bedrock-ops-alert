@@ -78,7 +78,7 @@ def _resolve_case_details(case_id):
 def _resolve_display_id_to_case_id(display_id):
     """
     Convert a Service Quotas display ID (e.g., '178093546000760') to the internal
-    AWS Support caseId format (e.g., 'case-578707974125-muen-2026-XXXXX').
+    AWS Support caseId format (e.g., 'case-111122223333-muen-2026-XXXXX').
     Service Quotas returns display IDs in its CaseId field; AWS Support API requires internal format.
     
     Returns:
