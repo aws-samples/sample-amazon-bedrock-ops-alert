@@ -9,15 +9,26 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 5.0"
     }
-    archive = {
-      source  = "hashicorp/archive"
-      version = ">= 2.4"
+    external = {
+      source  = "hashicorp/external"
+      version = ">= 2.3"
     }
   }
 }
 
 provider "aws" {
-  # Region is inherited from AWS_DEFAULT_REGION or configured here
+  region = var.aws_region
+
+  # Organization deployment: assume a role in the target account. Terraform has no StackSets, so
+  # the recommended multi-account pattern is one provider per account via assume_role, run once
+  # per account. Left empty for single-account, where local credentials are used directly.
+  dynamic "assume_role" {
+    for_each = var.target_account_id == "" ? [] : [1]
+    content {
+      role_arn = "arn:aws:iam::${var.target_account_id}:role/${var.assume_role_name}"
+    }
+  }
+
   default_tags {
     tags = {
       Solution = "Amazon-Bedrock-Ops-Alert"

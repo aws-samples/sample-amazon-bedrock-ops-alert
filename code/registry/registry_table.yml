@@ -1,0 +1,54 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Amazon Bedrock Ops Alert - registry table (one row per deployment)"
+
+# This stack creates only the registry table. registry.py runs locally under your own
+# credentials, so no Lambda or IAM role is required.
+
+Parameters:
+  RegistryTableName:
+    Type: String
+    Default: "bedrock-ops-alert-registry"
+    Description: "DynamoDB table holding one row per Bedrock Ops Alert deployment"
+    MinLength: 3
+    MaxLength: 255
+    AllowedPattern: "^[a-zA-Z0-9_.-]+$"
+
+Resources:
+  # AccountId        (HASH)  - registry.py reads one account's rows with a single Query.
+  # DeploymentTarget (RANGE) - <Region>#<CustomerName>#<BedrockModelName>. Region leads the key
+  #                            so begins_with('us-east-1#') matches all rows in a Region.
+  # No secondary index is required: rows are always read by account.
+  #
+  # No DeletionPolicy: deleting this stack deletes the table. The rows record deployments but are
+  # not the deployed resources, so the workload stacks are unaffected. To resume management,
+  # recreate the table, re-add the rows, and run `plan` to reconcile against CloudFormation.
+  RegistryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref RegistryTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: AccountId
+          AttributeType: S
+        - AttributeName: DeploymentTarget
+          AttributeType: S
+      KeySchema:
+        - AttributeName: AccountId
+          KeyType: HASH
+        - AttributeName: DeploymentTarget
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Solution
+          Value: Amazon-Bedrock-Ops-Alert
+
+Outputs:
+  RegistryTableName:
+    Description: "Registry table name - pass to registry.py with --table"
+    Value: !Ref RegistryTable
+  RegistryTableArn:
+    Description: "Registry table ARN"
+    Value: !GetAtt RegistryTable.Arn

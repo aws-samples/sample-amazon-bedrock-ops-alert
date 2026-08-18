@@ -14,9 +14,9 @@ resource "aws_iam_role" "quota_calculator" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
+        Effect    = "Allow"
         Principal = { Service = "lambda.amazonaws.com" }
-        Action = "sts:AssumeRole"
+        Action    = "sts:AssumeRole"
       }
     ]
   })
@@ -51,8 +51,8 @@ resource "aws_iam_role_policy" "quota_calculator_parameter_store" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["ssm:PutParameter"]
+        Effect = "Allow"
+        Action = ["ssm:PutParameter"]
         Resource = [
           "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/thresholds/*",
           "arn:aws:ssm:${local.region}:${local.account_id}:parameter/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/resolved-model-id-display"
@@ -87,9 +87,9 @@ resource "aws_iam_role" "alarm_updater" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
+        Effect    = "Allow"
         Principal = { Service = "lambda.amazonaws.com" }
-        Action = "sts:AssumeRole"
+        Action    = "sts:AssumeRole"
       }
     ]
   })
@@ -176,9 +176,9 @@ resource "aws_iam_role" "notification_processor" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
+        Effect    = "Allow"
         Principal = { Service = "lambda.amazonaws.com" }
-        Action = "sts:AssumeRole"
+        Action    = "sts:AssumeRole"
       }
     ]
   })
@@ -279,9 +279,9 @@ resource "aws_iam_role_policy" "notification_processor_service_quotas" {
         }
       },
       {
-        Effect    = "Allow"
-        Action    = ["servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota"]
-        Resource  = "*"
+        Effect   = "Allow"
+        Action   = ["servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota"]
+        Resource = "*"
         Condition = {
           StringEquals = {
             "servicequotas:service" = "bedrock"
@@ -316,8 +316,8 @@ resource "aws_iam_role_policy" "notification_processor_cloudwatch" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["cloudwatch:DescribeAlarms", "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData"]
+        Effect = "Allow"
+        Action = ["cloudwatch:DescribeAlarms", "cloudwatch:GetMetricStatistics", "cloudwatch:GetMetricData"]
         # Note: DescribeAlarms requires Resource: "*" to retrieve composite alarm state
         # (poll_until_composite_ok). GetMetricStatistics/GetMetricData do not support resource-level permissions.
         # Reference: https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_DescribeAlarms.html

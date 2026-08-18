@@ -6,11 +6,11 @@
 # =============================================================================
 
 resource "aws_lambda_layer_version" "quota_utils" {
-  layer_name          = "${var.customer_name}-Quota-Utils-Layer-${var.bedrock_model_name}"
-  description         = "Shared utilities for quota calculation and threshold management"
-  s3_bucket           = var.lambda_s3_bucket
-  s3_key              = "quota_utils_layer.zip"
-  compatible_runtimes = ["python3.14"]
+  layer_name               = "${var.customer_name}-Quota-Utils-Layer-${var.bedrock_model_name}"
+  description              = "Shared utilities for quota calculation and threshold management"
+  s3_bucket                = var.lambda_s3_bucket
+  s3_key                   = "quota_utils_layer.zip"
+  compatible_runtimes      = ["python3.14"]
   compatible_architectures = ["arm64"]
 }
 
@@ -20,15 +20,15 @@ resource "aws_lambda_layer_version" "quota_utils" {
 # =============================================================================
 
 resource "aws_lambda_function" "quota_calculator" {
-  function_name    = "${var.customer_name}-Quota-Calculator-${var.bedrock_model_name}"
-  role             = aws_iam_role.quota_calculator.arn
-  handler          = "quota_calculator.handler"
-  runtime          = "python3.14"
-  timeout          = 300
-  architectures    = ["arm64"]
-  s3_bucket        = var.lambda_s3_bucket
-  s3_key           = "quota_calculator.zip"
-  layers           = [aws_lambda_layer_version.quota_utils.arn]
+  function_name = "${var.customer_name}-Quota-Calculator-${var.bedrock_model_name}"
+  role          = aws_iam_role.quota_calculator.arn
+  handler       = "quota_calculator.handler"
+  runtime       = "python3.14"
+  timeout       = 300
+  architectures = ["arm64"]
+  s3_bucket     = var.lambda_s3_bucket
+  s3_key        = "quota_calculator.zip"
+  layers        = [aws_lambda_layer_version.quota_utils.arn]
 }
 
 # =============================================================================
@@ -36,15 +36,15 @@ resource "aws_lambda_function" "quota_calculator" {
 # =============================================================================
 
 resource "aws_lambda_function" "alarm_updater" {
-  function_name    = "${var.customer_name}-Alarm-Updater-${var.bedrock_model_name}"
-  role             = aws_iam_role.alarm_updater.arn
-  handler          = "alarm_updater.handler"
-  runtime          = "python3.14"
-  timeout          = 300
-  architectures    = ["arm64"]
-  s3_bucket        = var.lambda_s3_bucket
-  s3_key           = "alarm_updater.zip"
-  layers           = [aws_lambda_layer_version.quota_utils.arn]
+  function_name = "${var.customer_name}-Alarm-Updater-${var.bedrock_model_name}"
+  role          = aws_iam_role.alarm_updater.arn
+  handler       = "alarm_updater.handler"
+  runtime       = "python3.14"
+  timeout       = 300
+  architectures = ["arm64"]
+  s3_bucket     = var.lambda_s3_bucket
+  s3_key        = "alarm_updater.zip"
+  layers        = [aws_lambda_layer_version.quota_utils.arn]
 
   environment {
     variables = {
@@ -77,27 +77,27 @@ resource "aws_lambda_function" "notification_processor" {
 
   environment {
     variables = {
-      CUSTOMER_NAME_SECRET                        = aws_secretsmanager_secret.customer_name.name
-      BEDROCK_MODEL_ID                            = var.bedrock_model_id
-      BEDROCK_MODEL_ID_DISPLAY                    = data.aws_ssm_parameter.resolved_model_id_display.value
-      INFERENCE_PROFILE_TYPE                      = var.inference_profile_type
-      BEDROCK_MODEL_NAME                          = var.bedrock_model_name
-      GEO_DATA_RESIDENCY_REQUIREMENT              = var.geo_data_residency_requirement
-      INPUT_MODALITIES                            = var.input_modalities
-      STAKEHOLDER_EMAILS_SECRET                   = aws_secretsmanager_secret.stakeholder_emails.name
-      NOTIFICATION_PREFERENCE_PARAM               = aws_ssm_parameter.notification_preference.name
-      FORMATTED_TOPIC_ARN                         = aws_sns_topic.formatted_notification.arn
-      ENABLE_AUTOMATED_SUPPORT_CASE_PARAM         = aws_ssm_parameter.enable_automated_support_case.name
-      USE_CASE_DESCRIPTION_PARAM                  = aws_ssm_parameter.use_case_description.name
-      TOKENS_PER_MINUTE_INCREASE_PERCENT_PARAM    = aws_ssm_parameter.tokens_per_minute_increase_percent.name
-      REQUESTS_PER_MINUTE_INCREASE_PERCENT_PARAM  = aws_ssm_parameter.requests_per_minute_increase_percent.name
-      SUPPORT_CASE_LOOKBACK_DAYS                  = tostring(var.support_case_lookback_days)
-      AUTOMATION_REPLY_MAX_ATTEMPTS                = "120"
-      REQUESTS_PER_MINUTE_QUOTA_CODE              = var.requests_per_minute_quota_code
-      TOKENS_PER_MINUTE_QUOTA_CODE                = var.tokens_per_minute_quota_code
-      ELIGIBLE_ALARM_PATTERNS                     = "ServerErrors-Critical,Throttles-Critical,ClientErrors-Critical,HighLatency-Warning,LatencyAnomaly-Warning,HighInvocationRate-Warning,HighTPMQuotaUsage-Warning,InvocationAnomaly-Warning,InputTokenAnomaly-Warning,OutputTokenAnomaly-Warning"
-      RPM_ALARM_PATTERNS                          = "HighInvocationRate,InvocationAnomaly"
-      TPM_ALARM_PATTERNS                          = "HighTPMQuotaUsage,InputTokenAnomaly,OutputTokenAnomaly"
+      CUSTOMER_NAME_SECRET                       = aws_secretsmanager_secret.customer_name.name
+      BEDROCK_MODEL_ID                           = var.bedrock_model_id
+      BEDROCK_MODEL_ID_DISPLAY                   = data.aws_ssm_parameter.resolved_model_id_display.value
+      INFERENCE_PROFILE_TYPE                     = var.inference_profile_type
+      BEDROCK_MODEL_NAME                         = var.bedrock_model_name
+      GEO_DATA_RESIDENCY_REQUIREMENT             = var.geo_data_residency_requirement
+      INPUT_MODALITIES                           = var.input_modalities
+      STAKEHOLDER_EMAILS_SECRET                  = aws_secretsmanager_secret.stakeholder_emails.name
+      NOTIFICATION_PREFERENCE_PARAM              = aws_ssm_parameter.notification_preference.name
+      FORMATTED_TOPIC_ARN                        = aws_sns_topic.formatted_notification.arn
+      ENABLE_AUTOMATED_SUPPORT_CASE_PARAM        = aws_ssm_parameter.enable_automated_support_case.name
+      USE_CASE_DESCRIPTION_PARAM                 = aws_ssm_parameter.use_case_description.name
+      TOKENS_PER_MINUTE_INCREASE_PERCENT_PARAM   = aws_ssm_parameter.tokens_per_minute_increase_percent.name
+      REQUESTS_PER_MINUTE_INCREASE_PERCENT_PARAM = aws_ssm_parameter.requests_per_minute_increase_percent.name
+      SUPPORT_CASE_LOOKBACK_DAYS                 = tostring(var.support_case_lookback_days)
+      AUTOMATION_REPLY_MAX_ATTEMPTS              = "120"
+      REQUESTS_PER_MINUTE_QUOTA_CODE             = var.requests_per_minute_quota_code
+      TOKENS_PER_MINUTE_QUOTA_CODE               = var.tokens_per_minute_quota_code
+      ELIGIBLE_ALARM_PATTERNS                    = "ServerErrors-Critical,Throttles-Critical,ClientErrors-Critical,HighLatency-Warning,LatencyAnomaly-Warning,HighInvocationRate-Warning,HighTPMQuotaUsage-Warning,InvocationAnomaly-Warning,InputTokenAnomaly-Warning,OutputTokenAnomaly-Warning"
+      RPM_ALARM_PATTERNS                         = "HighInvocationRate,InvocationAnomaly"
+      TPM_ALARM_PATTERNS                         = "HighTPMQuotaUsage,InputTokenAnomaly,OutputTokenAnomaly"
     }
   }
 }
@@ -110,13 +110,13 @@ resource "aws_lambda_invocation" "quota_calculator" {
   function_name = aws_lambda_function.quota_calculator.function_name
 
   input = jsonencode({
-    RequestType = "Create"
-    StackId     = "arn:aws:cloudformation:${local.region}:${local.account_id}:stack/terraform-managed/00000000"
-    RequestId   = "terraform-quota-calculator"
+    RequestType       = "Create"
+    StackId           = "arn:aws:cloudformation:${local.region}:${local.account_id}:stack/terraform-managed/00000000"
+    RequestId         = "terraform-quota-calculator"
     LogicalResourceId = "QuotaCalculatorCustomResource"
     ResourceProperties = {
-      RequestsPerMinuteQuotaCode       = var.requests_per_minute_quota_code
-      TokensPerMinuteQuotaCode         = var.tokens_per_minute_quota_code
+      RequestsPerMinuteQuotaCode        = var.requests_per_minute_quota_code
+      TokensPerMinuteQuotaCode          = var.tokens_per_minute_quota_code
       RequestsPerMinuteThresholdPercent = tostring(var.requests_per_minute_threshold_percent)
       TokensPerMinuteThresholdPercent   = tostring(var.tokens_per_minute_threshold_percent)
       CustomerName                      = var.customer_name

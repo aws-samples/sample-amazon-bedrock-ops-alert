@@ -2,175 +2,76 @@
 # SPDX-License-Identifier: MIT-0
 
 # =============================================================================
-# Amazon Bedrock Ops Alert - Main Terraform Configuration
-# 1:1 translation from bedrock-quota-alarm.yml CloudFormation template
-# Zero features killed. Zero logic changes. Same AWS resources.
+# Registry-driven Terraform deployment.
+#
+# registry_rows.py reads the DynamoDB registry (reusing code/registry/registry_core.py),
+# selects the deployable rows for this run's account and Region, validates them, and returns
+# them as JSON. Terraform then instantiates the workload module once per row. The registry is
+# the desired state: add a row (or clear its Status) to deploy it, set PENDING_DELETE or remove
+# the row to have Terraform destroy it.
 # =============================================================================
 
 data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
+
+data "external" "registry" {
+  program = ["python3", "${path.module}/registry_rows.py"]
+
+  query = {
+    table        = var.registry_table_name
+    table_region = var.registry_table_region == "" ? var.aws_region : var.registry_table_region
+    region       = var.aws_region
+    account_id   = var.target_account_id == "" ? data.aws_caller_identity.current.account_id : var.target_account_id
+  }
+}
 
 locals {
-  region     = data.aws_region.current.region
-  account_id = data.aws_caller_identity.current.account_id
+  # registry_rows.py returns {"rows": "<json array string>"}; decode to a list of row objects.
+  rows = jsondecode(data.external.registry.result.rows)
 }
 
-# =============================================================================
-# KMS Key — encrypts SNS topics and Secrets Manager secrets
-# =============================================================================
+module "deployment" {
+  source   = "./modules/bedrock-ops-alert"
+  for_each = { for row in local.rows : row.deployment_target => row }
 
-resource "aws_kms_key" "bedrock_ops_alert" {
-  description             = "KMS key for Bedrock Ops Alert — encrypts SNS topics and Secrets Manager secrets"
-  enable_key_rotation     = true
-  deletion_window_in_days = 30
+  # A null value makes Terraform fall back to the module variable's default, which mirrors the
+  # registry's "blank column means use the template default" behavior.
+  customer_name          = each.value.customer_name
+  bedrock_model_name     = each.value.bedrock_model_name
+  stakeholder_email_list = each.value.stakeholder_email_list
+  lambda_s3_bucket       = each.value.lambda_s3_bucket
 
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "Enable IAM User Permissions for Key Management"
-        Effect = "Allow"
-        Principal = {
-          AWS = "arn:aws:iam::${local.account_id}:root"
-        }
-        Action   = ["kms:*"]
-        Resource = "*"
-      },
-      {
-        Sid    = "Allow CloudWatch Alarms to Encrypt"
-        Effect = "Allow"
-        Principal = {
-          Service = "cloudwatch.amazonaws.com"
-        }
-        Action   = ["kms:Decrypt", "kms:GenerateDataKey*"]
-        Resource = "*"
-      },
-      {
-        Sid    = "Allow SNS Service to Use Key"
-        Effect = "Allow"
-        Principal = {
-          Service = "sns.amazonaws.com"
-        }
-        Action   = ["kms:Decrypt", "kms:GenerateDataKey*"]
-        Resource = "*"
-      }
-    ]
-  })
-}
+  notification_preference        = each.value.notification_preference
+  inference_profile_type         = each.value.inference_profile_type
+  bedrock_model_id               = each.value.bedrock_model_id
+  geo_data_residency_requirement = each.value.geo_data_residency_requirement
+  input_modalities               = each.value.input_modalities
 
-resource "aws_kms_alias" "bedrock_ops_alert" {
-  name          = "alias/${var.customer_name}-bedrock-ops-alert-${var.bedrock_model_name}"
-  target_key_id = aws_kms_key.bedrock_ops_alert.key_id
-}
+  requests_per_minute_quota_code       = each.value.requests_per_minute_quota_code
+  requests_per_minute_increase_percent = each.value.requests_per_minute_increase_percent
+  tokens_per_minute_quota_code         = each.value.tokens_per_minute_quota_code
+  tokens_per_minute_increase_percent   = each.value.tokens_per_minute_increase_percent
 
-# =============================================================================
-# Secrets Manager — sensitive data encrypted with shared KMS key
-# =============================================================================
+  requests_per_minute_threshold_percent = each.value.requests_per_minute_threshold_percent
+  tokens_per_minute_threshold_percent   = each.value.tokens_per_minute_threshold_percent
+  latency_threshold_ms                  = each.value.latency_threshold_ms
 
-resource "aws_secretsmanager_secret" "customer_name" {
-  name                    = "${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/customer-name"
-  kms_key_id              = aws_kms_key.bedrock_ops_alert.arn
-  description             = "Customer name for Bedrock quota monitoring"
-  recovery_window_in_days = 0
-}
+  enable_automated_support_case = each.value.enable_automated_support_case
+  support_case_lookback_days    = each.value.support_case_lookback_days
+  use_case_description          = each.value.use_case_description
 
-resource "aws_secretsmanager_secret_version" "customer_name" {
-  secret_id     = aws_secretsmanager_secret.customer_name.id
-  secret_string = var.customer_name
-}
+  enable_automated_threshold_update       = each.value.enable_automated_threshold_update
+  threshold_update_schedule_interval_days = each.value.threshold_update_schedule_interval_days
 
-resource "aws_secretsmanager_secret" "stakeholder_emails" {
-  name                    = "${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/stakeholder-emails"
-  kms_key_id              = aws_kms_key.bedrock_ops_alert.arn
-  description             = "Stakeholder emails for quota monitoring alerts"
-  recovery_window_in_days = 0
-}
+  error_threshold                   = each.value.error_threshold
+  critical_alarm_evaluation_periods = each.value.critical_alarm_evaluation_periods
 
-resource "aws_secretsmanager_secret_version" "stakeholder_emails" {
-  secret_id     = aws_secretsmanager_secret.stakeholder_emails.id
-  secret_string = join(",", var.stakeholder_email_list)
-}
+  warning_alarm_evaluation_periods = each.value.warning_alarm_evaluation_periods
+  latency_alarm_period             = each.value.latency_alarm_period
+  latency_alarm_evaluation_periods = each.value.latency_alarm_evaluation_periods
 
-# =============================================================================
-# SSM Parameters — configuration store (updatable post-deployment)
-# =============================================================================
+  anomaly_detection_period   = each.value.anomaly_detection_period
+  anomaly_evaluation_periods = each.value.anomaly_evaluation_periods
+  anomaly_sensitivity        = each.value.anomaly_sensitivity
 
-resource "aws_ssm_parameter" "notification_preference" {
-  name        = "/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/notification-preference"
-  type        = "String"
-  value       = var.notification_preference
-  description = "Email notification preference: all (Critical and Warning), critical (Critical Only), warning (Warning Only)"
-}
-
-resource "aws_ssm_parameter" "inference_profile_type" {
-  name        = "/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/inference-profile-type"
-  type        = "String"
-  value       = var.inference_profile_type
-  description = "Inference profile type: System-Defined or Application"
-}
-
-resource "aws_ssm_parameter" "enable_automated_support_case" {
-  name        = "/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/enable-automated-support-case"
-  type        = "String"
-  value       = var.enable_automated_support_case
-  description = "Enable automated support case creation for quota increases"
-}
-
-resource "aws_ssm_parameter" "use_case_description" {
-  name        = "/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/use-case-description"
-  type        = "String"
-  value       = var.use_case_description
-  description = "Use case description for quota increase justification"
-}
-
-resource "aws_ssm_parameter" "tokens_per_minute_increase_percent" {
-  name        = "/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/tokens-per-minute-increase-percent"
-  type        = "String"
-  value       = tostring(var.tokens_per_minute_increase_percent)
-  description = "Percentage increase to request for Tokens Per Minute quota"
-}
-
-resource "aws_ssm_parameter" "requests_per_minute_increase_percent" {
-  name        = "/${var.customer_name}/bedrock/quota-monitoring/${var.bedrock_model_name}/requests-per-minute-increase-percent"
-  type        = "String"
-  value       = tostring(var.requests_per_minute_increase_percent)
-  description = "Percentage increase to request for Requests Per Minute quota"
-}
-
-# =============================================================================
-# SNS Topics — Raw (Lambda only) + Formatted (Email subscribers)
-# =============================================================================
-
-resource "aws_sns_topic" "raw_alarm" {
-  name              = "${var.customer_name}-Bedrock-Alarms-Raw-${var.bedrock_model_name}"
-  kms_master_key_id = aws_kms_key.bedrock_ops_alert.key_id
-}
-
-resource "aws_sns_topic" "formatted_notification" {
-  name              = "${var.customer_name}-Bedrock-Alarms-Formatted-${var.bedrock_model_name}"
-  kms_master_key_id = aws_kms_key.bedrock_ops_alert.key_id
-}
-
-resource "aws_sns_topic_policy" "raw_alarm" {
-  arn = aws_sns_topic.raw_alarm.arn
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Sid    = "AllowCloudWatchAlarmsToPublish"
-        Effect = "Allow"
-        Principal = {
-          Service = "cloudwatch.amazonaws.com"
-        }
-        Action   = ["SNS:Publish"]
-        Resource = aws_sns_topic.raw_alarm.arn
-        Condition = {
-          ArnLike = {
-            "aws:SourceArn" = "arn:aws:cloudwatch:${local.region}:${local.account_id}:alarm:${var.customer_name}-Bedrock-*"
-          }
-        }
-      }
-    ]
-  })
+  alarm_evaluation_period = each.value.alarm_evaluation_period
 }

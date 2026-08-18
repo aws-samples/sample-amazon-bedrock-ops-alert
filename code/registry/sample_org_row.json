@@ -1,0 +1,53 @@
+{
+  "TableName": "bedrock-ops-alert-registry",
+  "Item": {
+    "AccountId":            {"S": "REPLACE_ME_TARGET_ACCOUNT_ID"},
+    "DeploymentTarget":     {"S": "us-east-1#EXAMPLE#G-Opus-4-6"},
+    "OrganizationalUnitId": {"S": "REPLACE_ME_OU_ID"},
+    "Status":               {"S": "TEST"},
+    "StatusReason":         {"S": "Reference row for the organization method. Copy it, set AccountId to the target member account and OrganizationalUnitId to its OU, then set Status to empty to deploy."},
+    "StackId":              {"S": ""},
+    "CreatedAt":            {"S": ""},
+    "UpdatedAt":            {"S": ""},
+    "Tags":                 {"S": "Solution=Amazon-Bedrock-Ops-Alert,Environment=Production,Team=AI-SRE"},
+
+    "StakeholderEmailList":   {"S": "you@example.com"},
+    "NotificationPreference": {"S": "all"},
+
+    "LambdaS3Bucket": {"S": "REPLACE_ME_BUCKET_NAME"},
+
+    "InferenceProfileType":        {"S": "System-Defined"},
+    "BedrockModelId":              {"S": "global.anthropic.claude-opus-4-6-v1"},
+    "GeoDataResidencyRequirement": {"S": "No"},
+    "InputModalities":             {"S": "TEXT and IMAGE"},
+
+    "RequestsPerMinuteQuotaCode":       {"S": "L-3DD46812"},
+    "RequestsPerMinuteIncreasePercent": {"S": "25"},
+    "TokensPerMinuteQuotaCode":         {"S": "L-3DCCFAA4"},
+    "TokensPerMinuteIncreasePercent":   {"S": "25"},
+
+    "RequestsPerMinuteThresholdPercent": {"S": "80"},
+    "TokensPerMinuteThresholdPercent":   {"S": "80"},
+    "LatencyThresholdMs":                {"S": "240000"},
+
+    "EnableAutomatedSupportCase": {"S": "Yes"},
+    "SupportCaseLookbackDays":    {"S": "60"},
+    "UseCaseDescription":         {"S": "Enterprise production workload serving real-time AI-powered features to end users."},
+
+    "EnableAutomatedThresholdUpdate":      {"S": "Yes"},
+    "ThresholdUpdateScheduleIntervalDays": {"S": "1"},
+
+    "ErrorThreshold":                 {"S": "5"},
+    "CriticalAlarmEvaluationPeriods": {"S": "5"},
+
+    "WarningAlarmEvaluationPeriods": {"S": "5"},
+    "LatencyAlarmPeriod":            {"S": "300"},
+    "LatencyAlarmEvaluationPeriods": {"S": "2"},
+
+    "AnomalyDetectionPeriod":   {"S": "900"},
+    "AnomalyEvaluationPeriods": {"S": "12"},
+    "AnomalySensitivity":       {"S": "9"},
+
+    "AlarmEvaluationPeriod": {"S": "60"}
+  }
+}
